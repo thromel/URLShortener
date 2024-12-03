@@ -1,0 +1,22 @@
+# IDE - VSCode
+.vscode/
+
+# IDE - JetBrains Rider
+.idea/
+*.sln.iml
+
+# .NET Build Output
+bin/
+obj/
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# .NET
+*.dll
+*.pdb
+*.cache
