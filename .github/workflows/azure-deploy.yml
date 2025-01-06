@@ -32,13 +32,14 @@ jobs:
       - name: Deploy Bicep template
         run: |
           az deployment group create \
-            --resource-group urlshortener-rg \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
             --template-file ./infrastructure/main.bicep \
-            --parameters name=urlshortener
+            --parameters name=urlshortener \
+            --location ${{ vars.RESOURCE_GROUP_LOCATION }}
 
       - name: Get Web App Name
         run: |
-          WEB_APP_NAME=$(az webapp list --resource-group urlshortener-rg --query "[0].name" -o tsv)
+          WEB_APP_NAME=$(az webapp list --resource-group ${{ vars.RESOURCE_GROUP_NAME }} --query "[0].name" -o tsv)
           echo "WEB_APP_NAME=$WEB_APP_NAME" >> $GITHUB_ENV
 
       - name: Setup .NET
@@ -60,7 +61,109 @@ jobs:
       - name: Deploy to Azure Web App
         run: |
           az webapp deploy \
-            --resource-group urlshortener-rg \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --name $WEB_APP_NAME \
+            --src-path ./publish.zip \
+            --type zip
+
+  deploy-stg:
+    runs-on: ubuntu-latest
+    environment: Staging
+    needs: deploy-dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Bicep template
+        run: |
+          az deployment group create \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --template-file ./infrastructure/main.bicep \
+            --parameters name=urlshortener-stg \
+            --location ${{ vars.RESOURCE_GROUP_LOCATION }}
+
+      - name: Get Web App Name
+        run: |
+          WEB_APP_NAME=$(az webapp list --resource-group ${{ vars.RESOURCE_GROUP_NAME }} --query "[0].name" -o tsv)
+          echo "WEB_APP_NAME=$WEB_APP_NAME" >> $GITHUB_ENV
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: |
+          dotnet restore
+          dotnet build --configuration Release
+          dotnet publish -c Release -o ./publish
+
+      - name: Zip the publish folder
+        run: |
+          cd publish
+          zip -r ../publish.zip .
+
+      - name: Deploy to Azure Web App
+        run: |
+          az webapp deploy \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --name $WEB_APP_NAME \
+            --src-path ./publish.zip \
+            --type zip
+
+  deploy-prod:
+    runs-on: ubuntu-latest
+    environment: Production
+    needs: deploy-stg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Bicep template
+        run: |
+          az deployment group create \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --template-file ./infrastructure/main.bicep \
+            --parameters name=urlshortener-prod \
+            --location ${{ vars.RESOURCE_GROUP_LOCATION }}
+
+      - name: Get Web App Name
+        run: |
+          WEB_APP_NAME=$(az webapp list --resource-group ${{ vars.RESOURCE_GROUP_NAME }} --query "[0].name" -o tsv)
+          echo "WEB_APP_NAME=$WEB_APP_NAME" >> $GITHUB_ENV
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: |
+          dotnet restore
+          dotnet build --configuration Release
+          dotnet publish -c Release -o ./publish
+
+      - name: Zip the publish folder
+        run: |
+          cd publish
+          zip -r ../publish.zip .
+
+      - name: Deploy to Azure Web App
+        run: |
+          az webapp deploy \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
             --name $WEB_APP_NAME \
             --src-path ./publish.zip \
             --type zip
