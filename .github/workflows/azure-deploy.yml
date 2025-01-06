@@ -52,9 +52,15 @@ jobs:
           dotnet build --configuration Release
           dotnet publish -c Release -o ./publish
 
+      - name: Zip the publish folder
+        run: |
+          cd publish
+          zip -r ../publish.zip .
+
       - name: Deploy to Azure Web App
         run: |
-          az webapp deployment source config-zip \
+          az webapp deploy \
             --resource-group urlshortener-rg \
             --name $WEB_APP_NAME \
-            --src ./publish.zip
+            --src-path ./publish.zip \
+            --type zip
