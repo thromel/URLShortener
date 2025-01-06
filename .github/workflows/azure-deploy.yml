@@ -34,8 +34,7 @@ jobs:
           az deployment group create \
             --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
             --template-file ./infrastructure/main.bicep \
-            --parameters name=urlshortener \
-            --location ${{ vars.RESOURCE_GROUP_LOCATION }}
+            --parameters name=urlshortener location=${{ vars.RESOURCE_GROUP_LOCATION }}
 
       - name: Get Web App Name
         run: |
@@ -85,8 +84,7 @@ jobs:
           az deployment group create \
             --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
             --template-file ./infrastructure/main.bicep \
-            --parameters name=urlshortener-stg \
-            --location ${{ vars.RESOURCE_GROUP_LOCATION }}
+            --parameters name=urlshortener-stg location=${{ vars.RESOURCE_GROUP_LOCATION }}
 
       - name: Get Web App Name
         run: |
@@ -136,8 +134,7 @@ jobs:
           az deployment group create \
             --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
             --template-file ./infrastructure/main.bicep \
-            --parameters name=urlshortener-prod \
-            --location ${{ vars.RESOURCE_GROUP_LOCATION }}
+            --parameters name=urlshortener-prod location=${{ vars.RESOURCE_GROUP_LOCATION }}
 
       - name: Get Web App Name
         run: |
