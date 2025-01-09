@@ -26,12 +26,12 @@ jobs:
       - name: Test
         run: dotnet test --no-build --verbosity normal
       - name: Publish
-        run: dotnet publish -c Release -o ${{ env.DOTNET_ROOT }}/publish
+        run: dotnet publish -c Release -o ./publish
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: net-app
-          path: ${{ env.DOTNET_ROOT }}/publish
+          path: ./publish
 
   deploy:
     needs: build
@@ -43,7 +43,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: net-app
-          path: ${{ env.DOTNET_ROOT }}/publish
+          path: ./publish
 
       - name: Login to Azure
         uses: azure/login@v2.1.1
@@ -59,13 +59,13 @@ jobs:
 
       - name: Zip the publish folder
         run: |
-          cd ${{ env.DOTNET_ROOT }}/publish
-          zip -r ${{ env.DOTNET_ROOT }}/publish.zip .
+          cd ./publish
+          zip -r ../publish.zip .
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
-          package: ${{ env.DOTNET_ROOT }}/publish.zip
+          package: ./publish.zip
           slot-name: Development
           app-name: ${{ vars.API_RESOURCE_NAME }}
