@@ -5,24 +5,67 @@ name: API
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ['master']
   pull_request:
-    branches: [ "master" ]
+    branches: ['master']
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 8.0.x
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Build
-      run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore dependencies
+        run: dotnet restore
+      - name: Build
+        run: dotnet build --no-restore
+      - name: Test
+        run: dotnet test --no-build --verbosity normal
+      - name: Publish
+        run: dotnet publish -c Release -o ${{ env.DOTNET_ROOT }}/publish
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: net-app
+          path: ${{ env.DOTNET_ROOT }}/publish
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: Development
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: net-app
+          path: ${{ env.DOTNET_ROOT }}/publish
+
+      - name: Login to Azure
+        uses: azure/login@v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get Web App Name
+        run: |
+          WEB_APP_NAME=$(az webapp list --resource-group ${{ vars.RESOURCE_GROUP_NAME }} --query "[0].name" -o tsv)
+          echo "WEB_APP_NAME=$WEB_APP_NAME" >> $GITHUB_ENV
+
+      - name: Zip the publish folder
+        run: |
+          cd ${{ env.DOTNET_ROOT }}/publish
+          zip -r ${{ env.DOTNET_ROOT }}/publish.zip .
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
+          package: ${{ env.DOTNET_ROOT }}/publish.zip
+          slot-name: Development
+          app-name: ${{ vars.API_RESOURCE_NAME }}
