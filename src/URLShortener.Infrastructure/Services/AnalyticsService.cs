@@ -1,0 +1,306 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using URLShortener.Core.Interfaces;
+using URLShortener.Infrastructure.Data;
+using URLShortener.Infrastructure.Data.Entities;
+using System.Runtime.CompilerServices;
+
+namespace URLShortener.Infrastructure.Services;
+
+public class AnalyticsService : IAnalyticsService
+{
+    private readonly UrlShortenerDbContext _context;
+    private readonly ILogger<AnalyticsService> _logger;
+
+    public AnalyticsService(UrlShortenerDbContext context, ILogger<AnalyticsService> logger)
+    {
+        _context = context;
+        _logger = logger;
+    }
+
+    public async Task RecordCacheHitAsync(string shortCode, string layer, TimeSpan responseTime)
+    {
+        // This could be sent to a time-series database like InfluxDB or Prometheus
+        _logger.LogDebug("Cache {Layer} hit for {ShortCode} in {ResponseTime}ms",
+            layer, shortCode, responseTime.TotalMilliseconds);
+    }
+
+    public async Task RecordCacheMissAsync(string shortCode, TimeSpan responseTime)
+    {
+        _logger.LogDebug("Cache miss for {ShortCode} in {ResponseTime}ms",
+            shortCode, responseTime.TotalMilliseconds);
+    }
+
+    public async Task RecordSecurityEventAsync(string shortCode, string eventType)
+    {
+        _logger.LogWarning("Security event {EventType} for {ShortCode}", eventType, shortCode);
+
+        // In production, you would:
+        // 1. Send to security monitoring system
+        // 2. Trigger alerts if needed
+        // 3. Store in security event log
+    }
+
+    public async Task<IEnumerable<PopularUrl>> GetTopUrlsAsync(int count, TimeSpan timeWindow)
+    {
+        var cutoffTime = DateTime.UtcNow.Subtract(timeWindow);
+
+        var topUrls = await _context.Analytics
+            .Where(a => a.Timestamp >= cutoffTime)
+            .GroupBy(a => a.ShortCode)
+            .Select(g => new
+            {
+                ShortCode = g.Key,
+                AccessCount = g.Count()
+            })
+            .OrderByDescending(x => x.AccessCount)
+            .Take(count)
+            .ToListAsync();
+
+        var result = new List<PopularUrl>();
+
+        foreach (var item in topUrls)
+        {
+            var url = await _context.Urls
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.ShortCode == item.ShortCode);
+
+            if (url != null)
+            {
+                result.Add(new PopularUrl(
+                    ShortCode: item.ShortCode,
+                    OriginalUrl: url.OriginalUrl,
+                    AccessCount: item.AccessCount,
+                    TrendScore: CalculateTrendScore(item.AccessCount, timeWindow)
+                ));
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<IEnumerable<PopularUrl>> GetTrendingUrlsAsync(int count, TimeSpan timeWindow)
+    {
+        var cutoffTime = DateTime.UtcNow.Subtract(timeWindow);
+        var halfWindow = DateTime.UtcNow.Subtract(TimeSpan.FromTicks(timeWindow.Ticks / 2));
+
+        // Get URLs with increasing access patterns
+        var trendingUrls = await _context.Analytics
+            .Where(a => a.Timestamp >= cutoffTime)
+            .GroupBy(a => a.ShortCode)
+            .Select(g => new
+            {
+                ShortCode = g.Key,
+                TotalCount = g.Count(),
+                RecentCount = g.Count(a => a.Timestamp >= halfWindow),
+                TrendRatio = (double)g.Count(a => a.Timestamp >= halfWindow) / g.Count()
+            })
+            .Where(x => x.TrendRatio > 0.6) // URLs with 60%+ of traffic in recent half
+            .OrderByDescending(x => x.TrendRatio)
+            .ThenByDescending(x => x.TotalCount)
+            .Take(count)
+            .ToListAsync();
+
+        var result = new List<PopularUrl>();
+
+        foreach (var item in trendingUrls)
+        {
+            var url = await _context.Urls
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.ShortCode == item.ShortCode);
+
+            if (url != null)
+            {
+                result.Add(new PopularUrl(
+                    ShortCode: item.ShortCode,
+                    OriginalUrl: url.OriginalUrl,
+                    AccessCount: item.TotalCount,
+                    TrendScore: item.TrendRatio * 100
+                ));
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<IEnumerable<PopularUrl>> GetRegionalPopularUrlsAsync(string region, int count, TimeSpan timeWindow)
+    {
+        var cutoffTime = DateTime.UtcNow.Subtract(timeWindow);
+
+        // Map region to countries (simplified)
+        var countries = GetCountriesForRegion(region);
+
+        var popularUrls = await _context.Analytics
+            .Where(a => a.Timestamp >= cutoffTime && countries.Contains(a.Country))
+            .GroupBy(a => a.ShortCode)
+            .Select(g => new
+            {
+                ShortCode = g.Key,
+                AccessCount = g.Count()
+            })
+            .OrderByDescending(x => x.AccessCount)
+            .Take(count)
+            .ToListAsync();
+
+        var result = new List<PopularUrl>();
+
+        foreach (var item in popularUrls)
+        {
+            var url = await _context.Urls
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.ShortCode == item.ShortCode);
+
+            if (url != null)
+            {
+                result.Add(new PopularUrl(
+                    ShortCode: item.ShortCode,
+                    OriginalUrl: url.OriginalUrl,
+                    AccessCount: item.AccessCount,
+                    TrendScore: CalculateTrendScore(item.AccessCount, timeWindow)
+                ));
+            }
+        }
+
+        return result;
+    }
+
+    public async IAsyncEnumerable<AnalyticsPoint> StreamAnalyticsAsync(
+        string shortCode,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            AnalyticsPoint? point = null;
+
+            try
+            {
+                var recentData = await GetRecentAnalyticsData(shortCode);
+
+                point = new AnalyticsPoint(
+                    Timestamp: DateTime.UtcNow,
+                    AccessCount: recentData.TotalAccesses,
+                    AccessRate: recentData.AccessRate,
+                    Metadata: new Dictionary<string, object>
+                    {
+                        ["unique_countries"] = recentData.UniqueCountries,
+                        ["unique_devices"] = recentData.UniqueDevices,
+                        ["mobile_percentage"] = recentData.MobilePercentage
+                    }
+                );
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error streaming analytics for {ShortCode}", shortCode);
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+                continue;
+            }
+
+            if (point != null)
+            {
+                yield return point;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+        }
+    }
+
+    public async Task<AnalyticsSummary> GetSummaryAsync(string shortCode, DateTime? startDate = null, DateTime? endDate = null)
+    {
+        startDate ??= DateTime.UtcNow.AddDays(-30);
+        endDate ??= DateTime.UtcNow;
+
+        var analytics = await _context.Analytics
+            .Where(a => a.ShortCode == shortCode &&
+                       a.Timestamp >= startDate &&
+                       a.Timestamp <= endDate)
+            .AsNoTracking()
+            .ToListAsync();
+
+        var totalAccesses = analytics.Count;
+        var uniqueVisitors = analytics.Select(a => a.IpAddress).Distinct().Count();
+
+        var countryBreakdown = analytics
+            .GroupBy(a => a.Country)
+            .ToDictionary(g => g.Key, g => (long)g.Count());
+
+        var deviceBreakdown = analytics
+            .GroupBy(a => a.DeviceType)
+            .ToDictionary(g => g.Key, g => (long)g.Count());
+
+        // Create hourly time series data
+        var timeSeriesData = analytics
+            .GroupBy(a => new DateTime(a.Timestamp.Year, a.Timestamp.Month, a.Timestamp.Day, a.Timestamp.Hour, 0, 0))
+            .ToDictionary(g => g.Key.ToString("yyyy-MM-dd HH:00"), g => (long)g.Count());
+
+        return new AnalyticsSummary(
+            ShortCode: shortCode,
+            TotalAccesses: totalAccesses,
+            UniqueVisitors: uniqueVisitors,
+            CountryBreakdown: countryBreakdown,
+            DeviceBreakdown: deviceBreakdown,
+            TimeSeriesData: timeSeriesData,
+            StartDate: startDate.Value,
+            EndDate: endDate.Value
+        );
+    }
+
+    private async Task<RecentAnalyticsData> GetRecentAnalyticsData(string shortCode)
+    {
+        var cutoffTime = DateTime.UtcNow.AddMinutes(-5);
+
+        var recentAnalytics = await _context.Analytics
+            .Where(a => a.ShortCode == shortCode && a.Timestamp >= cutoffTime)
+            .AsNoTracking()
+            .ToListAsync();
+
+        var totalAccesses = recentAnalytics.Count;
+        var accessRate = totalAccesses / 5.0; // Accesses per minute
+        var uniqueCountries = recentAnalytics.Select(a => a.Country).Distinct().Count();
+        var uniqueDevices = recentAnalytics.Select(a => a.DeviceType).Distinct().Count();
+        var mobileCount = recentAnalytics.Count(a => a.IsMobile);
+        var mobilePercentage = totalAccesses > 0 ? (mobileCount * 100.0) / totalAccesses : 0;
+
+        return new RecentAnalyticsData(
+            TotalAccesses: totalAccesses,
+            AccessRate: accessRate,
+            UniqueCountries: uniqueCountries,
+            UniqueDevices: uniqueDevices,
+            MobilePercentage: mobilePercentage
+        );
+    }
+
+    private static double CalculateTrendScore(long accessCount, TimeSpan timeWindow)
+    {
+        // Simple trend score calculation
+        var hoursInWindow = timeWindow.TotalHours;
+        var accessesPerHour = accessCount / hoursInWindow;
+
+        // Normalize to 0-100 scale (this could be more sophisticated)
+        return Math.Min(100, accessesPerHour * 10);
+    }
+
+    private static IEnumerable<string> GetCountriesForRegion(string region)
+    {
+        return region.ToLowerInvariant() switch
+        {
+            "us-east" => new[] { "US" },
+            "us-west" => new[] { "US" },
+            "europe" => new[] { "GB", "DE", "FR", "IT", "ES", "NL", "PL" },
+            "asia-pacific" => new[] { "JP", "KR", "SG", "AU", "IN", "CN" },
+            "australia" => new[] { "AU", "NZ" },
+            _ => new[] { "Unknown" }
+        };
+    }
+}
+
+internal record RecentAnalyticsData(
+    long TotalAccesses,
+    double AccessRate,
+    int UniqueCountries,
+    int UniqueDevices,
+    double MobilePercentage
+);
