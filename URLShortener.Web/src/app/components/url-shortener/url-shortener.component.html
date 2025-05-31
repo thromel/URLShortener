@@ -1,0 +1,89 @@
+<div class="container mt-5">
+  <div class="row justify-content-center">
+    <div class="col-md-8">
+      <div class="card shadow">
+        <div class="card-header bg-primary text-white">
+          <h3 class="mb-0">URL Shortener</h3>
+        </div>
+        <div class="card-body">
+          <form [formGroup]="urlForm" (ngSubmit)="onSubmit()">
+            <div class="mb-3">
+              <label for="url" class="form-label">URL to Shorten</label>
+              <input
+                type="url"
+                class="form-control"
+                id="url"
+                formControlName="url"
+                placeholder="https://example.com/very/long/url/that/needs/shortening"
+                required
+              />
+              <div *ngIf="urlForm.get('url')?.invalid && urlForm.get('url')?.touched" class="text-danger mt-1">
+                <small *ngIf="urlForm.get('url')?.errors?.['required']">URL is required</small>
+                <small *ngIf="urlForm.get('url')?.errors?.['pattern']">Please enter a valid URL (must start with http:// or https://)</small>
+              </div>
+            </div>
+            
+            <div class="mb-3">
+              <label for="customAlias" class="form-label">Custom Alias (Optional)</label>
+              <input
+                type="text"
+                class="form-control"
+                id="customAlias"
+                formControlName="customAlias"
+                placeholder="my-custom-link"
+              />
+              <small class="text-muted">Leave blank for an auto-generated short code</small>
+            </div>
+            
+            <div class="d-grid gap-2">
+              <button 
+                type="submit" 
+                class="btn btn-primary" 
+                [disabled]="urlForm.invalid || isLoading"
+              >
+                <span *ngIf="isLoading" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                Shorten URL
+              </button>
+            </div>
+          </form>
+          
+          <div *ngIf="error" class="alert alert-danger mt-3">
+            {{ error }}
+          </div>
+          
+          <div *ngIf="resultUrl" class="mt-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h5 class="card-title">Your Shortened URL</h5>
+                <div class="input-group mb-3">
+                  <input type="text" class="form-control" [value]="resultUrl.shortUrl" readonly />
+                  <button 
+                    class="btn btn-outline-success" 
+                    type="button" 
+                    (click)="copyToClipboard()"
+                  >
+                    <i class="bi bi-clipboard"></i> {{ copied ? 'Copied!' : 'Copy' }}
+                  </button>
+                </div>
+                
+                <div class="d-flex justify-content-between mt-3">
+                  <small class="text-muted">Created: {{ resultUrl.createdAt | date:'medium' }}</small>
+                  <small *ngIf="resultUrl.expiresAt" class="text-muted">Expires: {{ resultUrl.expiresAt | date:'medium' }}</small>
+                </div>
+                
+                <div class="text-center mt-3">
+                  <a [href]="resultUrl.shortUrl" target="_blank" class="btn btn-sm btn-primary me-2">
+                    Open Link
+                  </a>
+                  <button (click)="reset()" class="btn btn-sm btn-secondary">
+                    Create Another
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

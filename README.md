@@ -1,108 +1,212 @@
-# URLShortener
+# Modern URL Shortener
 
-A modern URL shortening service built with .NET 8.0.
+A scalable, cloud-native URL shortening service built with .NET 8.0, Angular, and AWS infrastructure.
 
 ## 🚀 Features
 
-- URL shortening
-- Swagger/OpenAPI documentation
-- HTTPS support
-- Development and Production configurations
-- Azure App Service deployment
+- Short URL generation with custom aliases
+- High-performance redirects with Redis caching
+- URL expiration and analytics
+- CQRS architecture with domain-driven design
+- Multi-layer caching strategy
+- Responsive Angular frontend with NgRx state management
+- Kubernetes orchestration and cloud-native design
+- Horizontal scaling support
 
 ## 🛠️ Tech Stack
 
-- .NET 8.0
-- ASP.NET Core Web API
-- Swagger/OpenAPI
-- IIS Express/Kestrel
-- Azure Bicep
-- Azure App Service
+### Backend
+- .NET 8.0 with ASP.NET Core
+- Entity Framework Core with PostgreSQL
+- Redis for distributed caching
+- CQRS pattern for command/query separation
+- Domain-Driven Design (DDD)
+
+### Frontend
+- Angular 17+ with TypeScript
+- NgRx for state management
+- Bootstrap 5 for responsive UI
+- RxJS for reactive programming
+
+### Infrastructure
+- AWS EKS (Kubernetes)
+- Aurora PostgreSQL
+- ElastiCache (Redis)
+- Terraform for Infrastructure as Code
+- GitHub Actions for CI/CD
 
 ## 🏗️ Prerequisites
 
 - .NET 8.0 SDK
-- Visual Studio 2022 or Visual Studio Code
-- Azure CLI
-- Azure subscription
+- Node.js and npm
+- Docker and Docker Compose
+- PostgreSQL and Redis (or use Docker containers)
 
 ## 🚦 Getting Started
 
+### Local Development
+
 1. Clone the repository
    ```bash
-   git clone https://github.com/yourusername/URLShortener.git
-   ```
-
-2. Azure Setup
-   ```bash
-   # Login to Azure
-   az login
-   
-   # Create an Azure AD application
-   APP_ID=$(az ad app create --display-name "GitHub-Actions-App" --query appId -o tsv)
-   
-   # Create a service principal
-   az ad sp create --id $APP_ID
-   
-   # Get subscription ID and tenant ID
-   SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-   TENANT_ID=$(az account show --query tenantId -o tsv)
-   
-   # Assign contributor role
-   az role assignment create \
-     --role contributor \
-     --subscription $SUBSCRIPTION_ID \
-     --assignee-object-id $(az ad sp show --id $APP_ID --query id -o tsv) \
-     --assignee-principal-type ServicePrincipal
-   
-   # Configure federated credentials
-   az ad app federated-credential create \
-     --id $APP_ID \
-     --parameters "{
-       'name': 'github-federated',
-       'issuer': 'https://token.actions.githubusercontent.com',
-       'subject': 'repo:yourusername/URLShortener:ref:refs/heads/master',
-       'audiences': ['api://AzureADTokenExchange']
-     }"
-   
-   # Create a resource group
-   az group create --name urlshortener-rg --location westeurope
-   
-   # Deploy infrastructure using Bicep
-   az deployment group create \
-     --resource-group urlshortener-rg \
-     --template-file infrastructure/main.bicep \
-     --parameters name=urlshortener
-   
-   echo "Add these secrets to your GitHub repository:"
-   echo "AZURE_CLIENT_ID: $APP_ID"
-   echo "AZURE_TENANT_ID: $TENANT_ID"
-   echo "AZURE_SUBSCRIPTION_ID: $SUBSCRIPTION_ID"
-   ```
-
-3. Local Development
-   ```bash
-   # Navigate to project directory
+   git clone https://github.com/thromel/URLShortener.git
    cd URLShortener
-   
-   # Restore dependencies
+   ```
+
+2. Run with Docker Compose (easiest option)
+   ```bash
+   docker-compose up
+   ```
+   This will start the API, PostgreSQL, Redis, and Angular frontend.
+### Manual Setup (without Docker)
+
+1. Set up the database
+   ```bash
+   # Start PostgreSQL locally or connect to an existing instance
+   # Create a database named 'urlshortener'
+   ```
+
+2. Set up Redis
+   ```bash
+   # Start Redis locally or connect to an existing instance
+   ```
+
+3. Build and run the API
+   ```bash
+   cd URLShortener
    dotnet restore
-   
-   # Run the application
+   dotnet build
+   cd URLShortener.API
    dotnet run
    ```
 
-4. Access the application
-   - Local: https://localhost:5001
-   - Azure: Your App Service URL will be displayed in the Azure portal
+4. Run the Angular frontend
+   ```bash
+   cd URLShortener.Web
+   npm install
+   npm start
+   ```
+
+## 🧪 Testing the Application
+
+1. API Endpoints:
+   - Create Short URL: POST https://localhost:5001/api/shorten
+   - Get URL Info: GET https://localhost:5001/api/{shortCode}
+   - Redirect: GET https://localhost:5001/{shortCode}
+
+2. Use Swagger UI at https://localhost:5001/swagger to test the API endpoints
+
+3. Access the Angular frontend at http://localhost:4200
+
+## 🏛️ Architecture
+
+### Domain-Driven Design
+
+The application follows DDD principles with these key components:
+
+- **Domain Layer** (Core): Contains the business logic, entities, and domain services
+- **Application Layer** (Core/CQRS): Implements CQRS pattern with commands and queries
+- **Infrastructure Layer**: Provides implementations for repositories and external services
+- **API Layer**: Exposes RESTful endpoints and handles HTTP requests
+
+### Caching Strategy
+
+The application uses a multi-layer caching approach:
+
+1. **Redis Distributed Cache**: Stores frequently accessed URLs for fast retrieval
+2. **Database**: Serves as the persistent storage for all short URLs
+
+### Scalability Considerations
+
+- **Horizontal Scaling**: Containerized services can scale horizontally behind a load balancer
+- **Database Partitioning**: PostgreSQL can be sharded for high-volume scenarios
+- **Redis Clustering**: Redis can be clustered for high-availability and throughput
+
+## 🚀 Deployment
+
+### AWS Deployment
+
+1. Set up AWS EKS cluster with Terraform
+   ```bash
+   cd infrastructure/terraform
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+2. Configure kubectl to use the EKS cluster
+   ```bash
+   aws eks update-kubeconfig --name urlshortener-cluster --region us-west-2
+   ```
+
+3. Deploy application using Kubernetes manifests
+   ```bash
+   kubectl apply -f infrastructure/kubernetes/
+   ```
+
+## 📦 Project Structure
+
+```
+URLShortener/
+├── URLShortener.API/          # API controllers and configuration
+├── URLShortener.Core/         # Domain models, interfaces, CQRS components
+├── URLShortener.Infrastructure/ # Repository implementations, DB context
+├── URLShortener.Web/          # Angular frontend
+├── infrastructure/            # IaC and Kubernetes manifests
+└── docker-compose.yml         # Local development setup
+```
+
+## 🛠️ Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📜 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
 
 ## 📝 Infrastructure Details
 
-The application is deployed to Azure App Service using Bicep templates. The infrastructure includes:
+The application is deployed to AWS using Terraform and Kubernetes. The infrastructure includes:
 
-- App Service Plan (Basic B1 tier)
-- Web App with .NET 8.0 runtime
-- HTTPS-only access
-- GitHub-based deployment
+- EKS Kubernetes cluster for container orchestration
+- Aurora PostgreSQL for the database
+- ElastiCache Redis for distributed caching
+- Application Load Balancer for traffic distribution
+- Auto-scaling node groups for horizontal scaling
+- VPC with public and private subnets
 
-You can customize the infrastructure by modifying the Bicep files in the `infrastructure` directory.
+To deploy the infrastructure to AWS:
+
+1. Configure AWS CLI with your credentials
+   ```bash
+   aws configure
+   ```
+
+2. Initialize and apply Terraform configuration
+   ```bash
+   cd infrastructure/terraform
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+3. Configure kubectl to work with your EKS cluster
+   ```bash
+   aws eks update-kubeconfig --name urlshortener-cluster --region us-west-2
+   ```
+
+4. Deploy the application to Kubernetes
+   ```bash
+   kubectl apply -f infrastructure/kubernetes/
+   ```
+
+5. Get the load balancer URL
+   ```bash
+   kubectl get ingress urlshortener-ingress
+   ```
+
+
+You can customize the infrastructure by modifying the Terraform files in the `infrastructure/terraform` directory.
