@@ -16,12 +16,6 @@ public record EventStream(
     int Version = 0
 );
 
-public class ConcurrencyException : Exception
-{
-    public ConcurrencyException(string message) : base(message) { }
-    public ConcurrencyException(string message, Exception innerException) : base(message, innerException) { }
-}
-
 public interface IEventStore
 {
     Task SaveEventsAsync(Guid aggregateId, IEnumerable<DomainEvent> events, int expectedVersion);

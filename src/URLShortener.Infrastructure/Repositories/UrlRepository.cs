@@ -86,7 +86,7 @@ public class UrlRepository : IUrlRepository
             aggregate.Id, aggregate.Version);
     }
 
-    public async Task DeleteAsync(string shortCode)
+    public async Task<bool> DeleteAsync(string shortCode)
     {
         var entity = await _context.Urls
             .FirstOrDefaultAsync(u => u.ShortCode == shortCode);
@@ -96,7 +96,10 @@ public class UrlRepository : IUrlRepository
             entity.Status = UrlStatus.Disabled;
             _context.Urls.Update(entity);
             await _context.SaveChangesAsync();
+            return true;
         }
+
+        return false;
     }
 
     public async Task<IEnumerable<ShortUrlAggregate>> GetByUserIdAsync(Guid userId, int skip = 0, int take = 50)
@@ -147,6 +150,90 @@ public class UrlRepository : IUrlRepository
             .ToListAsync();
 
         return entities.Select(CreateAggregateFromEntity);
+    }
+
+    public async Task<IEnumerable<UrlStatistics>> GetUserUrlsAsync(Guid userId, int skip = 0, int take = 50)
+    {
+        var entities = await _context.Urls
+            .AsNoTracking()
+            .Where(u => u.CreatedBy == userId)
+            .OrderByDescending(u => u.CreatedAt)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync();
+
+        return entities.Select(entity => new UrlStatistics(
+            ShortCode: entity.ShortCode,
+            OriginalUrl: entity.OriginalUrl,
+            AccessCount: entity.AccessCount,
+            CreatedAt: entity.CreatedAt,
+            LastAccessedAt: entity.LastAccessedAt,
+            ExpiresAt: entity.ExpiresAt,
+            Status: entity.Status,
+            CountryStats: new Dictionary<string, long>(),
+            DeviceStats: new Dictionary<string, long>(),
+            ReferrerStats: new Dictionary<string, long>()
+        ));
+    }
+
+    public async Task UpdateAccessCountAsync(string shortCode, long accessCount)
+    {
+        var entity = await _context.Urls
+            .FirstOrDefaultAsync(u => u.ShortCode == shortCode);
+
+        if (entity != null)
+        {
+            entity.AccessCount = accessCount;
+            entity.LastAccessedAt = DateTime.UtcNow;
+            _context.Urls.Update(entity);
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    public async Task UpdateStatusAsync(string shortCode, UrlStatus status)
+    {
+        var entity = await _context.Urls
+            .FirstOrDefaultAsync(u => u.ShortCode == shortCode);
+
+        if (entity != null)
+        {
+            entity.Status = status;
+            _context.Urls.Update(entity);
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    public async Task<IEnumerable<UrlStatistics>> SearchUrlsAsync(string searchTerm, int skip = 0, int take = 50)
+    {
+        var entities = await _context.Urls
+            .AsNoTracking()
+            .Where(u => u.OriginalUrl.Contains(searchTerm) || u.ShortCode.Contains(searchTerm))
+            .OrderByDescending(u => u.CreatedAt)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync();
+
+        return entities.Select(entity => new UrlStatistics(
+            ShortCode: entity.ShortCode,
+            OriginalUrl: entity.OriginalUrl,
+            AccessCount: entity.AccessCount,
+            CreatedAt: entity.CreatedAt,
+            LastAccessedAt: entity.LastAccessedAt,
+            ExpiresAt: entity.ExpiresAt,
+            Status: entity.Status,
+            CountryStats: new Dictionary<string, long>(),
+            DeviceStats: new Dictionary<string, long>(),
+            ReferrerStats: new Dictionary<string, long>()
+        ));
+    }
+
+    public async Task<Guid?> GetAggregateIdAsync(string shortCode)
+    {
+        var entity = await _context.Urls
+            .AsNoTracking()
+            .FirstOrDefaultAsync(u => u.ShortCode == shortCode);
+
+        return entity?.Id;
     }
 
     private static ShortUrlAggregate CreateAggregateFromEntity(UrlEntity entity)

@@ -29,6 +29,7 @@ public record AnalyticsSummary(
 
 public interface IAnalyticsService
 {
+    Task RecordAccessAsync(string shortCode, string ipAddress, string userAgent, string referrer, GeoLocation location, DeviceInfo deviceInfo);
     Task RecordCacheHitAsync(string shortCode, string layer, TimeSpan responseTime);
     Task RecordCacheMissAsync(string shortCode, TimeSpan responseTime);
     Task RecordSecurityEventAsync(string shortCode, string eventType);

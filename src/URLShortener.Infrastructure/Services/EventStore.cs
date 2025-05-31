@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using URLShortener.Core.Domain.Enhanced;
+using URLShortener.Core.Exceptions;
 using URLShortener.Core.Interfaces;
 using URLShortener.Infrastructure.Data;
 using URLShortener.Infrastructure.Data.Entities;
@@ -25,40 +26,33 @@ public class EventStore : IEventStore
 
         try
         {
-            // Check current version for concurrency control
-            var currentVersion = await _context.Events
-                .Where(e => e.AggregateId == aggregateId)
-                .MaxAsync(e => (int?)e.Version) ?? 0;
-
+            // Check for concurrency conflicts
+            var currentVersion = await GetCurrentVersionAsync(aggregateId);
             if (currentVersion != expectedVersion)
             {
                 throw new ConcurrencyException(
-                    $"Expected version {expectedVersion} but current version is {currentVersion} for aggregate {aggregateId}");
+                    $"Concurrency conflict for aggregate {aggregateId}. Expected version {expectedVersion}, but current version is {currentVersion}");
             }
 
-            var eventEntities = new List<EventEntity>();
-
-            foreach (var domainEvent in events)
+            foreach (var @event in events)
             {
                 var eventEntity = new EventEntity
                 {
-                    EventId = domainEvent.EventId,
-                    AggregateId = domainEvent.AggregateId,
-                    EventType = domainEvent.GetType().Name,
-                    EventData = JsonSerializer.Serialize(domainEvent, domainEvent.GetType()),
-                    OccurredAt = domainEvent.OccurredAt,
-                    Version = domainEvent.Version
+                    EventId = @event.EventId,
+                    AggregateId = aggregateId,
+                    EventType = @event.GetType().Name,
+                    EventData = JsonSerializer.Serialize(@event, @event.GetType()),
+                    OccurredAt = @event.OccurredAt,
+                    Version = @event.Version
                 };
 
-                eventEntities.Add(eventEntity);
+                _context.Events.Add(eventEntity);
             }
 
-            _context.Events.AddRange(eventEntities);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
-            _logger.LogDebug("Saved {EventCount} events for aggregate {AggregateId}",
-                events.Count(), aggregateId);
+            _logger.LogDebug("Saved {EventCount} events for aggregate {AggregateId}", events.Count(), aggregateId);
         }
         catch (Exception ex)
         {
@@ -70,74 +64,107 @@ public class EventStore : IEventStore
 
     public async Task<IEnumerable<DomainEvent>> GetEventsAsync(Guid aggregateId)
     {
-        var eventEntities = await _context.Events
-            .Where(e => e.AggregateId == aggregateId)
-            .OrderBy(e => e.Version)
-            .AsNoTracking()
-            .ToListAsync();
+        try
+        {
+            var eventEntities = await _context.Events
+                .Where(e => e.AggregateId == aggregateId)
+                .OrderBy(e => e.Version)
+                .AsNoTracking()
+                .ToListAsync();
 
-        return eventEntities.Select(DeserializeEvent);
+            return eventEntities.Select(DeserializeEvent).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get events for aggregate {AggregateId}", aggregateId);
+            throw;
+        }
     }
 
     public async Task<IEnumerable<DomainEvent>> GetEventsAsync(Guid aggregateId, int fromVersion)
     {
-        var eventEntities = await _context.Events
-            .Where(e => e.AggregateId == aggregateId && e.Version > fromVersion)
-            .OrderBy(e => e.Version)
-            .AsNoTracking()
-            .ToListAsync();
+        try
+        {
+            var eventEntities = await _context.Events
+                .Where(e => e.AggregateId == aggregateId && e.Version > fromVersion)
+                .OrderBy(e => e.Version)
+                .AsNoTracking()
+                .ToListAsync();
 
-        return eventEntities.Select(DeserializeEvent);
+            return eventEntities.Select(DeserializeEvent).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get events for aggregate {AggregateId} from version {FromVersion}", aggregateId, fromVersion);
+            throw;
+        }
     }
 
     public async Task<IEnumerable<DomainEvent>> GetEventsByTypeAsync(string eventType, DateTime? fromDate = null, DateTime? toDate = null)
     {
-        var query = _context.Events
-            .Where(e => e.EventType == eventType)
-            .AsNoTracking();
-
-        if (fromDate.HasValue)
+        try
         {
-            query = query.Where(e => e.OccurredAt >= fromDate.Value);
-        }
+            var query = _context.Events.Where(e => e.EventType == eventType);
 
-        if (toDate.HasValue)
+            if (fromDate.HasValue)
+                query = query.Where(e => e.OccurredAt >= fromDate.Value);
+
+            if (toDate.HasValue)
+                query = query.Where(e => e.OccurredAt <= toDate.Value);
+
+            var eventEntities = await query
+                .OrderBy(e => e.OccurredAt)
+                .AsNoTracking()
+                .ToListAsync();
+
+            return eventEntities.Select(DeserializeEvent).ToList();
+        }
+        catch (Exception ex)
         {
-            query = query.Where(e => e.OccurredAt <= toDate.Value);
+            _logger.LogError(ex, "Failed to get events by type {EventType}", eventType);
+            throw;
         }
-
-        var eventEntities = await query
-            .OrderBy(e => e.OccurredAt)
-            .ToListAsync();
-
-        return eventEntities.Select(DeserializeEvent);
     }
 
     public async Task<bool> ExistsAsync(Guid aggregateId)
     {
-        return await _context.Events
-            .AnyAsync(e => e.AggregateId == aggregateId);
+        try
+        {
+            return await _context.Events.AnyAsync(e => e.AggregateId == aggregateId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to check existence for aggregate {AggregateId}", aggregateId);
+            throw;
+        }
     }
 
-    private static DomainEvent DeserializeEvent(EventEntity eventEntity)
+    private async Task<int> GetCurrentVersionAsync(Guid aggregateId)
     {
-        var eventType = eventEntity.EventType switch
-        {
-            nameof(UrlCreatedEvent) => typeof(UrlCreatedEvent),
-            nameof(UrlAccessedEvent) => typeof(UrlAccessedEvent),
-            nameof(UrlExpiredEvent) => typeof(UrlExpiredEvent),
-            nameof(UrlDisabledEvent) => typeof(UrlDisabledEvent),
-            _ => throw new ArgumentException($"Unknown event type: {eventEntity.EventType}")
-        };
+        var maxVersion = await _context.Events
+            .Where(e => e.AggregateId == aggregateId)
+            .MaxAsync(e => (int?)e.Version);
 
-        var domainEvent = JsonSerializer.Deserialize(eventEntity.EventData, eventType) as DomainEvent;
+        return maxVersion ?? 0;
+    }
 
-        if (domainEvent == null)
+    private DomainEvent DeserializeEvent(EventEntity eventEntity)
+    {
+        try
         {
-            throw new InvalidOperationException($"Failed to deserialize event {eventEntity.EventId}");
+            var eventType = Type.GetType($"URLShortener.Core.Domain.Enhanced.{eventEntity.EventType}")
+                ?? throw new InvalidOperationException($"Unknown event type: {eventEntity.EventType}");
+
+            var domainEvent = JsonSerializer.Deserialize(eventEntity.EventData, eventType) as DomainEvent
+                ?? throw new InvalidOperationException($"Failed to deserialize event: {eventEntity.EventType}");
+
+            return domainEvent with { Version = eventEntity.Version };
         }
-
-        // Set the version from the stored event
-        return domainEvent with { Version = eventEntity.Version };
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to deserialize event {EventId} of type {EventType}",
+                eventEntity.EventId, eventEntity.EventType);
+            throw;
+        }
     }
 }

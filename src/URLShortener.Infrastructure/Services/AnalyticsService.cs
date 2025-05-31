@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using URLShortener.Core.Interfaces;
+using URLShortener.Core.Domain.Enhanced;
 using URLShortener.Infrastructure.Data;
 using URLShortener.Infrastructure.Data.Entities;
 using System.Runtime.CompilerServices;
@@ -16,6 +17,37 @@ public class AnalyticsService : IAnalyticsService
     {
         _context = context;
         _logger = logger;
+    }
+
+    public async Task RecordAccessAsync(string shortCode, string ipAddress, string userAgent, string referrer, GeoLocation location, DeviceInfo deviceInfo)
+    {
+        try
+        {
+            var analyticsEntity = new AnalyticsEntity
+            {
+                Id = Guid.NewGuid(),
+                ShortCode = shortCode,
+                IpAddress = ipAddress,
+                UserAgent = userAgent,
+                Referrer = referrer,
+                Country = location.Country,
+                Region = location.Region,
+                City = location.City,
+                DeviceType = deviceInfo.DeviceType,
+                Browser = deviceInfo.Browser,
+                OperatingSystem = deviceInfo.OperatingSystem,
+                Timestamp = DateTime.UtcNow
+            };
+
+            _context.Analytics.Add(analyticsEntity);
+            await _context.SaveChangesAsync();
+
+            _logger.LogDebug("Recorded analytics for {ShortCode} from {Country}", shortCode, location.Country);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to record analytics for {ShortCode}", shortCode);
+        }
     }
 
     public async Task RecordCacheHitAsync(string shortCode, string layer, TimeSpan responseTime)

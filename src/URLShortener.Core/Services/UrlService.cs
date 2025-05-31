@@ -1,7 +1,7 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using URLShortener.Core.Domain.Enhanced;
 using URLShortener.Core.Interfaces;
-using System.Text.RegularExpressions;
 
 namespace URLShortener.Core.Services;
 
@@ -22,9 +22,7 @@ public class UrlService : IUrlService
     // Blacklisted domains for security
     private static readonly HashSet<string> BlacklistedDomains = new(StringComparer.OrdinalIgnoreCase)
     {
-        "malware-site.com",
-        "phishing-site.com",
-        "spam-site.com"
+        "malware.com", "phishing.com", "spam.com"
     };
 
     public UrlService(
@@ -45,21 +43,8 @@ public class UrlService : IUrlService
 
     public async Task<string> CreateShortUrlAsync(CreateUrlRequest request)
     {
-        _logger.LogInformation("Creating short URL for {OriginalUrl}", request.OriginalUrl);
-
-        // Validate the URL
         await ValidateUrlAsync(request.OriginalUrl);
 
-        // Check custom alias availability
-        if (!string.IsNullOrEmpty(request.CustomAlias))
-        {
-            if (await _repository.ExistsAsync(request.CustomAlias))
-            {
-                throw new InvalidOperationException($"Custom alias '{request.CustomAlias}' is already taken");
-            }
-        }
-
-        // Create the aggregate
         var aggregate = ShortUrlAggregate.Create(
             originalUrl: request.OriginalUrl,
             userId: request.UserId,
@@ -70,25 +55,24 @@ public class UrlService : IUrlService
             metadata: request.Metadata
         );
 
-        // Save to event store
+        // Save events
         await _eventStore.SaveEventsAsync(aggregate.Id, aggregate.GetUncommittedEvents(), 0);
 
-        // Save to repository for read model
+        // Update read model
         await _repository.SaveAsync(aggregate);
 
-        // Cache the URL for fast access
-        await _cacheService.SetAsync(aggregate.ShortCode, aggregate.OriginalUrl,
-            request.ExpiresAt?.Subtract(DateTime.UtcNow));
+        // Cache the URL
+        await _cacheService.SetAsync(aggregate.ShortCode, aggregate.OriginalUrl);
 
-        _logger.LogInformation("Created short URL {ShortCode} for {OriginalUrl}",
-            aggregate.ShortCode, request.OriginalUrl);
+        _logger.LogInformation("Created short URL {ShortCode} for user {UserId}",
+            aggregate.ShortCode, request.UserId);
 
         return aggregate.ShortCode;
     }
 
     public async Task<string?> GetOriginalUrlAsync(string shortCode)
     {
-        // Try cache first for performance
+        // Try cache first
         var cachedUrl = await _cacheService.GetOriginalUrlAsync(shortCode);
         if (!string.IsNullOrEmpty(cachedUrl))
         {
@@ -98,7 +82,7 @@ public class UrlService : IUrlService
         // Fallback to repository
         var originalUrl = await _repository.GetOriginalUrlAsync(shortCode);
 
-        // Cache the result if found
+        // Cache for future requests
         if (!string.IsNullOrEmpty(originalUrl))
         {
             await _cacheService.SetAsync(shortCode, originalUrl);
@@ -111,20 +95,13 @@ public class UrlService : IUrlService
     {
         try
         {
-            // Get the aggregate to record the access
             var aggregate = await _repository.GetByShortCodeAsync(shortCode);
-            if (aggregate == null)
-            {
-                _logger.LogWarning("Attempted to record access for non-existent short code: {ShortCode}", shortCode);
-                return;
-            }
+            if (aggregate == null) return;
 
-            // Get geolocation data
-            var geoLocation = await _geoLocation.GetLocationAsync(ipAddress);
+            var location = await _geoLocation.GetLocationAsync(ipAddress);
             var deviceInfo = ParseUserAgent(userAgent);
 
-            // Record the access on the aggregate
-            aggregate.RecordAccess(ipAddress, userAgent, referrer, geoLocation, deviceInfo);
+            aggregate.RecordAccess(ipAddress, userAgent, referrer, location, deviceInfo);
 
             // Save events
             await _eventStore.SaveEventsAsync(aggregate.Id, aggregate.GetUncommittedEvents(), aggregate.Version - 1);
@@ -132,12 +109,15 @@ public class UrlService : IUrlService
             // Update read model
             await _repository.SaveAsync(aggregate);
 
+            // Record analytics
+            await _analytics.RecordAccessAsync(shortCode, ipAddress, userAgent, referrer, location, deviceInfo);
+
             _logger.LogDebug("Recorded access for {ShortCode} from {IpAddress}", shortCode, ipAddress);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to record access for {ShortCode}", shortCode);
-            // Don't throw - access recording shouldn't break the redirect
+            // Don't throw here as this shouldn't break the redirect
         }
     }
 
@@ -149,7 +129,6 @@ public class UrlService : IUrlService
             throw new ArgumentException($"Short code '{shortCode}' not found");
         }
 
-        // Get detailed analytics from analytics service
         var analyticsSummary = await _analytics.GetSummaryAsync(shortCode);
 
         return new UrlStatistics(
@@ -162,7 +141,7 @@ public class UrlService : IUrlService
             Status: aggregate.Status,
             CountryStats: analyticsSummary.CountryBreakdown,
             DeviceStats: analyticsSummary.DeviceBreakdown,
-            ReferrerStats: new Dictionary<string, long>() // Could be extracted from events
+            ReferrerStats: new Dictionary<string, long>()
         );
     }
 
@@ -296,10 +275,7 @@ public class UrlService : IUrlService
             throw new ArgumentException($"Domain '{uri.Host}' is not allowed");
         }
 
-        // Additional security checks could be added here:
-        // - Check against threat intelligence APIs
-        // - Validate URL is reachable
-        // - Check for redirects to malicious sites
+        await Task.CompletedTask;
     }
 
     private static DeviceInfo ParseUserAgent(string userAgent)
@@ -329,45 +305,5 @@ public class UrlService : IUrlService
         var deviceType = isMobile ? "Mobile" : "Desktop";
 
         return new DeviceInfo(deviceType, browser, os, isMobile);
-    }
-}
-
-public interface IGeoLocationService
-{
-    Task<GeoLocation> GetLocationAsync(string ipAddress);
-}
-
-public class GeoLocationService : IGeoLocationService
-{
-    private readonly ILogger<GeoLocationService> _logger;
-
-    public GeoLocationService(ILogger<GeoLocationService> logger)
-    {
-        _logger = logger;
-    }
-
-    public async Task<GeoLocation> GetLocationAsync(string ipAddress)
-    {
-        try
-        {
-            // This is a simplified implementation
-            // In production, you would integrate with a service like:
-            // - MaxMind GeoIP2
-            // - IP2Location
-            // - ipapi.co
-
-            if (string.IsNullOrEmpty(ipAddress) || ipAddress == "127.0.0.1" || ipAddress == "::1")
-            {
-                return new GeoLocation("Unknown", "Unknown", "Unknown", 0, 0);
-            }
-
-            // Mock implementation - replace with actual geolocation service
-            return new GeoLocation("US", "California", "San Francisco", 37.7749, -122.4194);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to get geolocation for IP {IpAddress}", ipAddress);
-            return new GeoLocation("Unknown", "Unknown", "Unknown", 0, 0);
-        }
     }
 }

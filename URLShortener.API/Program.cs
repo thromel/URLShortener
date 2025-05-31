@@ -4,6 +4,9 @@ using Microsoft.OpenApi.Models;
 using Serilog;
 using URLShortener.Core.Interfaces;
 using URLShortener.Core.Services;
+using URLShortener.Infrastructure.Data;
+using URLShortener.Infrastructure.Repositories;
+using URLShortener.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,10 +23,44 @@ builder.Host.UseSerilog();
 // Add services to the container
 builder.Services.AddControllers();
 
+// Database Configuration
+builder.Services.AddDbContext<UrlShortenerDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+    if (!string.IsNullOrEmpty(connectionString))
+    {
+        options.UseNpgsql(connectionString);
+    }
+    else
+    {
+        // Fallback to in-memory database for development
+        options.UseInMemoryDatabase("URLShortenerDb");
+        Log.Warning("Using in-memory database. Configure PostgreSQL connection string for production.");
+    }
+});
+
 // Memory Cache
 builder.Services.AddMemoryCache();
 
-// Authentication & Authorization (optional for now)
+// Redis Cache Configuration
+var redisConnectionString = builder.Configuration.GetConnectionString("Redis");
+if (!string.IsNullOrEmpty(redisConnectionString))
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnectionString;
+        options.InstanceName = "URLShortener";
+    });
+    Log.Information("Redis cache configured with connection: {RedisConnection}", redisConnectionString);
+}
+else
+{
+    // Fallback to in-memory distributed cache
+    builder.Services.AddDistributedMemoryCache();
+    Log.Warning("Using in-memory distributed cache. Configure Redis for production.");
+}
+
+// Authentication & Authorization
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -34,12 +71,37 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 
 builder.Services.AddAuthorization();
 
-// Health Checks (basic)
-builder.Services.AddHealthChecks();
+// Health Checks
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<UrlShortenerDbContext>();
 
-// Basic service implementations
-builder.Services.AddScoped<IUrlService, BasicUrlService>();
-builder.Services.AddScoped<IAnalyticsService, BasicAnalyticsService>();
+// Core Service Implementations
+var useEnhancedServices = builder.Configuration.GetValue<bool>("Features:UseEnhancedServices", false);
+
+if (useEnhancedServices)
+{
+    // Enterprise-grade implementations
+    builder.Services.AddScoped<IUrlRepository, UrlRepository>();
+    builder.Services.AddScoped<ICacheService, HierarchicalCacheService>();
+    builder.Services.AddScoped<IEventStore, EventStore>();
+    builder.Services.AddScoped<IAnalyticsService, AnalyticsService>();
+    builder.Services.AddScoped<IGeoLocationService, GeoLocationService>();
+    builder.Services.AddScoped<ICdnCache, CloudFrontCacheService>();
+    builder.Services.AddScoped<IUrlService, EnhancedUrlService>();
+
+    // Background services
+    builder.Services.AddHostedService<PredictiveCacheWarmingService>();
+
+    Log.Information("Using enhanced enterprise services");
+}
+else
+{
+    // Basic implementations for development/testing
+    builder.Services.AddScoped<IUrlRepository, UrlRepository>();
+    builder.Services.AddScoped<IUrlService, BasicUrlService>();
+    builder.Services.AddScoped<IAnalyticsService, BasicAnalyticsService>();
+    Log.Information("Using basic services for development");
+}
 
 // Swagger/OpenAPI
 builder.Services.AddEndpointsApiExplorer();
@@ -96,6 +158,23 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Database Migration (for development)
+if (app.Environment.IsDevelopment())
+{
+    using var scope = app.Services.CreateScope();
+    var context = scope.ServiceProvider.GetRequiredService<UrlShortenerDbContext>();
+
+    try
+    {
+        context.Database.EnsureCreated();
+        Log.Information("Database initialized successfully");
+    }
+    catch (Exception ex)
+    {
+        Log.Error(ex, "Failed to initialize database");
+    }
+}
+
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
@@ -110,14 +189,14 @@ if (app.Environment.IsDevelopment())
 // Security headers middleware
 app.Use(async (context, next) =>
 {
-    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-    context.Response.Headers.Add("X-Frame-Options", "DENY");
-    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
-    context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers["X-XSS-Protection"] = "1; mode=block";
+    context.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
 
     if (!app.Environment.IsDevelopment())
     {
-        context.Response.Headers.Add("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+        context.Response.Headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
     }
 
     await next();
@@ -158,7 +237,7 @@ app.UseExceptionHandler(errorApp =>
     });
 });
 
-Log.Information("Starting URL Shortener API...");
+Log.Information("Starting URL Shortener API with enhanced features: {UseEnhanced}", useEnhancedServices);
 
 try
 {

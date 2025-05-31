@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using URLShortener.Core.Interfaces;
+using URLShortener.Core.Domain.Enhanced;
 
 namespace URLShortener.Core.Services;
 
@@ -73,5 +74,11 @@ public class BasicAnalyticsService : IAnalyticsService
             StartDate: startDate ?? DateTime.UtcNow.AddDays(-30),
             EndDate: endDate ?? DateTime.UtcNow
         ));
+    }
+
+    public async Task RecordAccessAsync(string shortCode, string ipAddress, string userAgent, string referrer, GeoLocation location, DeviceInfo deviceInfo)
+    {
+        _logger.LogDebug("Recording access for {ShortCode} from {Country}", shortCode, location.Country);
+        await Task.CompletedTask;
     }
 }
