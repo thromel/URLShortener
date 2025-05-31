@@ -1,120 +1,252 @@
-provider "aws" {
-  region = var.aws_region
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.23"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.10"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.1"
+    }
+  }
 }
 
-# Create EKS Cluster
+provider "aws" {
+  region = var.aws_region
+  
+  default_tags {
+    tags = var.tags
+  }
+}
+
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+    
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
+    }
+  }
+}
+
+# Local values for resource naming
+locals {
+  name_prefix = "${var.project_name}-${var.environment}"
+}
+
+# VPC Module
+module "vpc" {
+  source = "./modules/vpc"
+  
+  name_prefix        = local.name_prefix
+  cidr               = var.vpc_cidr
+  availability_zones = var.availability_zones
+  tags               = var.tags
+}
+
+# EKS Module
 module "eks" {
-  source          = "terraform-aws-modules/eks/aws"
-  version         = "~> 19.0"
-  cluster_name    = var.cluster_name
-  cluster_version = "1.27"
+  source = "./modules/eks"
+  
+  cluster_name    = "${local.name_prefix}-cluster"
+  cluster_version = var.kubernetes_version
   
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
   
-  cluster_endpoint_public_access = true
+  node_groups = var.eks_node_groups
+  tags        = var.tags
   
-  eks_managed_node_groups = {
-    main = {
-      min_size       = 2
-      max_size       = 10
-      desired_size   = 3
-      instance_types = ["t3.medium"]
-    }
-  }
+  depends_on = [module.vpc]
+}
+
+# RDS PostgreSQL Module
+module "rds" {
+  source = "./modules/rds"
   
-  # Allow worker nodes to assume role to interact with other AWS services
-  node_security_group_additional_rules = {
-    ingress_self_all = {
-      description = "Node to node all ports/protocols"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      self        = true
-    }
-    egress_all = {
-      description = "Node all egress"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "egress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
+  name_prefix = local.name_prefix
+  
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.database_subnets
+  
+  allowed_security_group_ids = [module.eks.worker_security_group_id]
+  
+  instance_class    = var.rds_instance_class
+  allocated_storage = var.rds_allocated_storage
+  
+  database_name = var.database_name
+  database_user = var.database_user
+  
+  backup_retention_period = var.rds_backup_retention_period
+  backup_window          = var.rds_backup_window
+  maintenance_window     = var.rds_maintenance_window
   
   tags = var.tags
 }
 
-# Create Aurora PostgreSQL cluster
-module "aurora_postgresql" {
-  source  = "terraform-aws-modules/rds-aurora/aws"
-  version = "~> 7.0"
+# ElastiCache Redis Module
+module "redis" {
+  source = "./modules/redis"
   
-  name              = "${var.project_name}-postgres"
-  engine            = "aurora-postgresql"
-  engine_version    = "13.7"
-  instance_type     = "db.t3.medium"
-  instances = {
-    1 = {}
-    2 = {}
-  }
+  name_prefix = local.name_prefix
   
-  vpc_id            = module.vpc.vpc_id
-  subnets           = module.vpc.database_subnets
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
   
-  allowed_security_groups = [module.eks.node_security_group_id]
+  allowed_security_group_ids = [module.eks.worker_security_group_id]
   
-  storage_encrypted = true
-  apply_immediately = true
-  
-  db_parameter_group_name         = aws_db_parameter_group.postgres.id
-  db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.postgres.id
-  
-  database_name     = "urlshortener"
-  master_username   = "postgres"
-  master_password   = random_password.database_password.result
+  node_type               = var.redis_node_type
+  num_cache_nodes        = var.redis_num_nodes
+  parameter_group_name   = var.redis_parameter_group
   
   tags = var.tags
 }
 
-# Create ElastiCache Redis cluster
-resource "aws_elasticache_replication_group" "redis" {
-  replication_group_id          = "${var.project_name}-redis"
-  replication_group_description = "Redis cluster for URL Shortener"
+# CloudFront Distribution Module
+module "cloudfront" {
+  source = "./modules/cloudfront"
   
-  node_type            = "cache.t3.small"
-  port                 = 6379
-  parameter_group_name = "default.redis6.x"
+  name_prefix = local.name_prefix
   
-  num_cache_clusters   = 2
-  
-  subnet_group_name    = aws_elasticache_subnet_group.redis.name
-  security_group_ids   = [aws_security_group.redis.id]
-  
-  automatic_failover_enabled = true
+  # We'll point this to our ALB once the application is deployed
+  origin_domain_name = module.alb.dns_name
   
   tags = var.tags
 }
 
-# Random password for database
-resource "random_password" "database_password" {
-  length  = 16
-  special = false
+# Application Load Balancer Module
+module "alb" {
+  source = "./modules/alb"
+  
+  name_prefix = local.name_prefix
+  
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.public_subnets
+  
+  certificate_arn = module.acm.certificate_arn
+  
+  tags = var.tags
 }
 
-# Create Kubernetes secret for database and Redis credentials
-resource "kubernetes_secret" "urlshortener_secrets" {
-  depends_on = [module.eks]
+# ACM Certificate Module
+module "acm" {
+  source = "./modules/acm"
   
-  metadata {
-    name = "urlshortener-secrets"
-  }
+  domain_name = var.domain_name
+  zone_id     = var.route53_zone_id
   
-  data = {
-    "postgres-connection-string" = "Host=${module.aurora_postgresql.cluster_endpoint};Database=urlshortener;Username=${module.aurora_postgresql.cluster_master_username};Password=${module.aurora_postgresql.cluster_master_password}"
-    "redis-connection-string"   = "${aws_elasticache_replication_group.redis.primary_endpoint_address}:${aws_elasticache_replication_group.redis.port}"
-  }
+  tags = var.tags
+}
+
+# Secrets Manager for application secrets
+resource "aws_secretsmanager_secret" "app_secrets" {
+  name_prefix = "${local.name_prefix}-secrets"
+  description = "Application secrets for URL Shortener"
   
-  type = "Opaque"
+  tags = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "app_secrets" {
+  secret_id = aws_secretsmanager_secret.app_secrets.id
+  secret_string = jsonencode({
+    postgres_connection_string = "Host=${module.rds.endpoint};Database=${var.database_name};Username=${var.database_user};Password=${module.rds.password}"
+    redis_connection_string   = "${module.redis.endpoint}:${module.redis.port}"
+    jwt_secret_key           = random_password.jwt_secret.result
+    cloudfront_distribution_id = module.cloudfront.distribution_id
+  })
+}
+
+# Random password for JWT secret
+resource "random_password" "jwt_secret" {
+  length  = 32
+  special = true
+}
+
+# IAM role for the application pods
+resource "aws_iam_role" "app_role" {
+  name_prefix = "${local.name_prefix}-app-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Effect = "Allow"
+        Principal = {
+          Federated = module.eks.oidc_provider_arn
+        }
+        Condition = {
+          StringEquals = {
+            "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:sub" = "system:serviceaccount:default:urlshortener-app"
+            "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:aud" = "sts.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+  
+  tags = var.tags
+}
+
+# IAM policy for the application
+resource "aws_iam_role_policy" "app_policy" {
+  name_prefix = "${local.name_prefix}-app-policy"
+  role        = aws_iam_role.app_role.id
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = aws_secretsmanager_secret.app_secrets.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudfront:CreateInvalidation",
+          "cloudfront:GetInvalidation",
+          "cloudfront:ListInvalidations"
+        ]
+        Resource = module.cloudfront.distribution_arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams",
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "arn:aws:logs:${var.aws_region}:*:*"
+      }
+    ]
+  })
 }

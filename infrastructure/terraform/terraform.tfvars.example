@@ -1,0 +1,42 @@
+# AWS Configuration
+aws_region = "us-west-2"
+project_name = "urlshortener"
+environment = "dev"
+
+# VPC Configuration
+vpc_cidr = "10.0.0.0/16"
+availability_zones = ["us-west-2a", "us-west-2b", "us-west-2c"]
+
+# EKS Configuration
+kubernetes_version = "1.28"
+eks_node_groups = {
+  main = {
+    instance_types = ["t3.medium"]
+    min_size       = 2
+    max_size       = 10
+    desired_size   = 3
+    disk_size      = 50
+  }
+}
+
+# RDS Configuration
+rds_instance_class = "db.t3.micro"
+rds_allocated_storage = 20
+database_name = "urlshortener"
+database_user = "postgres"
+
+# Redis Configuration
+redis_node_type = "cache.t3.micro"
+redis_num_nodes = 2
+
+# Domain Configuration (Optional)
+# Uncomment and set these if you have a custom domain
+# domain_name = "yourdomain.com"
+# route53_zone_id = "Z1234567890ABC"
+
+# Tags
+tags = {
+  Project     = "URLShortener"
+  Environment = "dev"
+  ManagedBy   = "Terraform"
+} 
