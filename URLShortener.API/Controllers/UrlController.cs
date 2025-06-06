@@ -51,10 +51,7 @@ public class UrlController : ControllerBase
 
             _logger.LogInformation("Created short URL {ShortCode} for user {UserId}", shortCode, userId);
 
-            return CreatedAtAction(
-                nameof(GetUrlStatistics),
-                new { shortCode },
-                new CreateUrlResponse(shortCode, shortUrl, dto.OriginalUrl));
+            return Ok(new CreateUrlResponse(shortCode, shortUrl, dto.OriginalUrl));
         }
         catch (ArgumentException ex)
         {
@@ -140,12 +137,12 @@ public class UrlController : ControllerBase
         }
     }
 
-    [HttpGet("{shortCode}/check")]
+    [HttpGet("available/{shortCode}")]
     [ProducesResponseType(typeof(AvailabilityResponse), 200)]
     public async Task<IActionResult> CheckAvailability(string shortCode)
     {
         var isAvailable = await _urlService.IsAvailableAsync(shortCode);
-        return Ok(new AvailabilityResponse(shortCode, isAvailable));
+        return Ok(new { shortCode, available = isAvailable });
     }
 
     [HttpGet("{shortCode}/analytics/real-time")]
@@ -213,4 +210,7 @@ public record DisableUrlDto(
 public record AvailabilityResponse(
     string ShortCode,
     bool IsAvailable
-);
+)
+{
+    public bool Available { get; init; } = IsAvailable;
+}
