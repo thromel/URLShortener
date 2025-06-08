@@ -34,4 +34,9 @@ public record CreateUrlResponse
     /// Expiration date if set
     /// </summary>
     public DateTime? ExpiresAt { get; init; }
+
+    /// <summary>
+    /// Error message if creation failed (used in bulk operations)
+    /// </summary>
+    public string? Error { get; init; }
 }

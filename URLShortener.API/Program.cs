@@ -93,7 +93,21 @@ builder.Services.AddResponseCaching(options =>
 });
 
 // Add API versioning
-builder.Services.AddApiVersioning();
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new Asp.Versioning.ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;
+    options.ApiVersionReader = Asp.Versioning.ApiVersionReader.Combine(
+        new Asp.Versioning.UrlSegmentApiVersionReader(),
+        new Asp.Versioning.HeaderApiVersionReader("X-Api-Version"),
+        new Asp.Versioning.QueryStringApiVersionReader("api-version")
+    );
+}).AddApiExplorer(options =>
+{
+    options.GroupNameFormat = "'v'VVV";
+    options.SubstituteApiVersionInUrl = true;
+});
 
 // Add rate limiting
 builder.Services.AddRateLimiter(options =>
@@ -205,6 +219,11 @@ builder.Services.AddSingleton<IInputValidationService, InputValidationService>()
 // Register metrics service
 builder.Services.AddSingleton<IMetrics, MetricsService>();
 
+// Register utility services
+builder.Services.AddScoped<URLShortener.API.Services.IQRCodeService, URLShortener.API.Services.QRCodeService>();
+builder.Services.AddScoped<URLShortener.API.Services.IClientInfoService, URLShortener.API.Services.ClientInfoService>();
+builder.Services.AddScoped<URLShortener.API.Services.IAnalyticsExportService, URLShortener.API.Services.AnalyticsExportService>();
+
 // Register background jobs
 builder.Services.AddScoped<IAnalyticsProcessingJob, AnalyticsProcessingJob>();
 
@@ -246,11 +265,30 @@ else
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
+    // Add API versions
     options.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
     {
         Title = "URL Shortener API",
         Version = "v1",
         Description = "A comprehensive URL shortener service with analytics, caching, and enterprise features",
+        Contact = new Microsoft.OpenApi.Models.OpenApiContact
+        {
+            Name = "URL Shortener Team",
+            Email = "support@urlshortener.com",
+            Url = new Uri("https://github.com/urlshortener/api")
+        },
+        License = new Microsoft.OpenApi.Models.OpenApiLicense
+        {
+            Name = "MIT License",
+            Url = new Uri("https://opensource.org/licenses/MIT")
+        }
+    });
+    
+    options.SwaggerDoc("v2", new Microsoft.OpenApi.Models.OpenApiInfo
+    {
+        Title = "URL Shortener API",
+        Version = "v2",
+        Description = "Enhanced URL shortener API with bulk operations, QR codes, and advanced analytics",
         Contact = new Microsoft.OpenApi.Models.OpenApiContact
         {
             Name = "URL Shortener Team",
@@ -338,7 +376,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(options =>
     {
         options.SwaggerEndpoint("/swagger/v1/swagger.json", "URL Shortener API v1");
+        options.SwaggerEndpoint("/swagger/v2/swagger.json", "URL Shortener API v2");
         options.RoutePrefix = "docs";
+        options.DocExpansion(Swashbuckle.AspNetCore.SwaggerUI.DocExpansion.None);
+        options.DisplayRequestDuration();
     });
 }
 
@@ -413,7 +454,7 @@ if (!string.IsNullOrEmpty(hangfireConnection))
     RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
         "cache-warming",
         job => job.WarmPopularUrlCacheAsync(),
-        Cron.MinuteInterval(30)); // Every 30 minutes
+        "*/30 * * * *"); // Every 30 minutes
 }
 
 // Health checks
