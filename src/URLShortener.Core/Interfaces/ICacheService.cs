@@ -7,6 +7,7 @@ public enum CacheInvalidationReason
     ManualInvalidation,
     UrlDeleted,
     UrlExpired,
+    UrlDisabled,
     SuspiciousActivity,
     PolicyViolation,
     SystemMaintenance

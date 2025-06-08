@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using URLShortener.Core.Interfaces;
 using URLShortener.Core.Domain.Enhanced;
+using System.Runtime.CompilerServices;
 
 namespace URLShortener.Core.Services;
 
@@ -49,7 +50,7 @@ public class BasicAnalyticsService : IAnalyticsService
         return await Task.FromResult(new List<PopularUrl>());
     }
 
-    public async IAsyncEnumerable<AnalyticsPoint> StreamAnalyticsAsync(string shortCode, CancellationToken cancellationToken)
+    public async IAsyncEnumerable<AnalyticsPoint> StreamAnalyticsAsync(string shortCode, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // Basic implementation - yield a single point and stop
         yield return new AnalyticsPoint(
@@ -79,6 +80,12 @@ public class BasicAnalyticsService : IAnalyticsService
     public async Task RecordAccessAsync(string shortCode, string ipAddress, string userAgent, string referrer, GeoLocation location, DeviceInfo deviceInfo)
     {
         _logger.LogDebug("Recording access for {ShortCode} from {Country}", shortCode, location.Country);
+        await Task.CompletedTask;
+    }
+
+    public async Task RecordCreationAsync(string shortCode, string originalUrl, string userId)
+    {
+        _logger.LogInformation("URL created: {ShortCode} -> {OriginalUrl} by user {UserId}", shortCode, originalUrl, userId);
         await Task.CompletedTask;
     }
 }

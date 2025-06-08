@@ -62,6 +62,22 @@ public class AnalyticsService : IAnalyticsService
         }
     }
 
+    public async Task RecordCreationAsync(string shortCode, string originalUrl, string userId)
+    {
+        try
+        {
+            _logger.LogInformation("URL created: {ShortCode} -> {OriginalUrl} by user {UserId}", 
+                shortCode, originalUrl, userId);
+            
+            // In a full implementation, this would record creation metrics
+            await Task.CompletedTask;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to record creation analytics for {ShortCode}", shortCode);
+        }
+    }
+
     public async Task RecordCacheHitAsync(string shortCode, string layer, TimeSpan responseTime)
     {
         // This could be sent to a time-series database like InfluxDB or Prometheus

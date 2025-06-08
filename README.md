@@ -12,19 +12,23 @@ A high-performance, enterprise-grade URL shortener built with .NET 8.0, featurin
 - **Bulk Operations**: Batch URL creation and management
 
 ### Advanced Architecture
-- **Event Sourcing & CQRS**: Complete audit trail and temporal queries
+- **CQRS with MediatR**: Command Query Responsibility Segregation with pipeline behaviors
+- **Event Sourcing & Domain Events**: Complete audit trail and temporal queries
 - **3-Tier Hierarchical Caching**: Memory (L1) → Redis (L2) → Database (L3)
-- **Circuit Breaker Pattern**: Resilience with Polly
-- **Real-time Analytics**: Live metrics with SignalR
+- **Circuit Breaker Pattern**: Resilience with Polly and retry mechanisms
+- **Real-time Analytics**: Live metrics with SignalR streaming
 - **Multi-region Deployment**: Global distribution with automatic failover
 
 ### Enterprise Features
-- **JWT Authentication**: Secure API access
-- **Rate Limiting**: Configurable request throttling
-- **Health Checks**: Comprehensive monitoring endpoints
-- **Structured Logging**: Serilog with multiple sinks
-- **OpenAPI/Swagger**: Complete API documentation
-- **Security Headers**: OWASP-compliant security
+- **JWT Authentication**: Secure API access with Bearer tokens
+- **Rate Limiting**: Advanced sliding window rate limiting with user partitioning
+- **Health Checks**: Comprehensive monitoring endpoints with database connectivity
+- **Structured Logging**: Serilog with enrichers, multiple sinks, and correlation IDs
+- **OpenAPI/Swagger**: Complete API documentation with security definitions
+- **Feature Flags**: Microsoft.FeatureManagement for controlled feature rollouts
+- **Background Jobs**: Hangfire for analytics processing and scheduled tasks
+- **Request Validation**: FluentValidation with comprehensive pipeline behaviors
+- **Security Headers**: OWASP-compliant security with CSP and HSTS
 
 ### Analytics & Monitoring
 - **Real-time Dashboards**: Live analytics streaming
@@ -82,23 +86,37 @@ Request → L1 Cache (Memory, ~1ms) → L2 Cache (Redis, ~5-10ms) → Database (
         95% Hit Rate              4% Hit Rate                1% Hit Rate
 ```
 
-### Event Sourcing Flow
+### CQRS and Event Sourcing Flow
 
 ```
-Command → Aggregate → Domain Events → Event Store → Read Model → Cache Invalidation
-                                   ↓
-                              Analytics Pipeline
+HTTP Request → MediatR Pipeline → Validation → Command Handler → Domain Events
+                     ↓                ↓              ↓              ↓
+               Logging Behavior → Performance → Event Store → Event Handlers
+                     ↓           Behavior           ↓              ↓
+               Response Caching ← Read Model ← Cache Update ← Analytics Recording
+```
+
+### Domain Event Processing
+
+```
+URL Created Event → Cache Warming + Analytics Recording
+URL Accessed Event → Real-time Analytics + Performance Tracking  
+URL Disabled Event → Cache Invalidation + Cleanup Tasks
 ```
 
 ## 🛠️ Technology Stack
 
 ### Backend
-- **.NET 8.0**: Latest LTS framework
-- **ASP.NET Core**: Web API framework
-- **Entity Framework Core**: ORM with PostgreSQL
-- **Polly**: Resilience and circuit breaker
-- **Serilog**: Structured logging
-- **SignalR**: Real-time communication
+- **.NET 8.0**: Latest LTS framework with top-level programs
+- **ASP.NET Core**: Web API framework with minimal APIs
+- **Entity Framework Core**: ORM with PostgreSQL and migrations
+- **MediatR**: CQRS implementation with pipeline behaviors
+- **FluentValidation**: Comprehensive input validation
+- **Polly**: Resilience patterns with circuit breaker and retry
+- **Serilog**: Structured logging with enrichers and correlation IDs
+- **Hangfire**: Background job processing and scheduling
+- **Microsoft.FeatureManagement**: Feature flags and toggles
+- **SignalR**: Real-time communication and analytics streaming
 
 ### Data Storage
 - **PostgreSQL**: Primary database with JSONB support
@@ -177,6 +195,7 @@ Command → Aggregate → Domain Events → Event Store → Read Model → Cache
    - API: `https://localhost:7001`
    - Swagger UI: `https://localhost:7001/docs`
    - Health Checks: `https://localhost:7001/health`
+   - Hangfire Dashboard: `https://localhost:7001/hangfire` (if configured)
 
 ### Docker Deployment
 
@@ -220,9 +239,14 @@ GET /r/{shortCode}
 GET /api/url/{shortCode}
 ```
 
-#### Real-time Analytics
+#### Get URL Analytics
 ```http
-GET /api/url/{shortCode}/analytics/real-time
+GET /api/url/{shortCode}/analytics
+```
+
+#### Real-time Analytics Stream
+```http
+GET /api/url/{shortCode}/analytics/stream
 ```
 
 ### Authentication
@@ -235,9 +259,11 @@ Authorization: Bearer <your-jwt-token>
 
 ### Rate Limiting
 
-- **Default API**: 100 requests/minute
-- **Redirects**: 1000 requests/minute
-- **Burst**: 50 queued requests
+- **Global Default**: 100 requests/minute per user/IP
+- **URL Creation**: 20 requests/minute per user/IP  
+- **URL Redirects**: 1000 requests/minute per IP
+- **Sliding Window**: 4 segments with queuing support
+- **Burst Handling**: Up to 10 queued requests
 
 ## 🔧 Configuration
 
@@ -265,11 +291,28 @@ RATE_LIMIT_REDIRECT_RPM=1000
 
 ```json
 {
-  "Features": {
+  "FeatureManagement": {
     "EnableAnalytics": true,
-    "EnableCaching": true,
+    "EnableAdvancedCaching": true,
     "EnableRateLimiting": true,
-    "EnableEventSourcing": true
+    "EnableEventSourcing": true,
+    "EnableBackgroundJobs": true,
+    "EnableEnhancedServices": false
+  }
+}
+```
+
+### CQRS Configuration
+
+```json
+{
+  "Features": {
+    "UseEnhancedServices": true
+  },
+  "MediatR": {
+    "EnableValidationBehavior": true,
+    "EnableLoggingBehavior": true,
+    "EnablePerformanceBehavior": true
   }
 }
 ```
@@ -371,13 +414,33 @@ spec:
 - `/health/ready` - Readiness probe
 - `/health/live` - Liveness probe
 
-### Metrics Collection
+### Structured Logging
 
 ```csharp
-// Custom metrics
-_metrics.IncrementCounter("url.created", new { region = "us-east-1" });
-_metrics.RecordDuration("cache.lookup", responseTime);
-_metrics.RecordValue("cache.hit_ratio", hitRatio);
+// Structured logging with correlation IDs
+_logger.LogInformation("URL created: {ShortCode} -> {OriginalUrl} by user {UserId}", 
+    shortCode, originalUrl, userId);
+
+// Performance monitoring
+using var activity = Activity.StartActivity("CreateShortUrl");
+activity?.SetTag("short_code", shortCode);
+activity?.SetTag("user_id", userId);
+```
+
+### Background Jobs
+
+```csharp
+// Recurring analytics processing
+RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
+    "analytics-processing",
+    job => job.ProcessAnalyticsBatchAsync(),
+    Cron.Hourly);
+
+// Daily cleanup tasks
+RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
+    "cleanup-expired",
+    job => job.CleanupExpiredUrlsAsync(),
+    Cron.Daily(3));
 ```
 
 ### Alerting Rules
@@ -435,22 +498,35 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Discussions**: [GitHub Discussions](https://github.com/your-org/urlshortener/discussions)
 - **Email**: support@urlshortener.com
 
-## 🗺️ Roadmap
+## 🗺️ Recent Enhancements
+
+### ✅ Completed (Latest Release)
+- [x] **CQRS with MediatR**: Command Query Responsibility Segregation
+- [x] **Domain Events**: Event-driven architecture with handlers
+- [x] **Pipeline Behaviors**: Validation, logging, and performance monitoring
+- [x] **Structured Logging**: Enhanced Serilog with enrichers and correlation IDs
+- [x] **Circuit Breaker**: Polly resilience patterns with retry mechanisms
+- [x] **Response Caching**: ETag-based caching with intelligent invalidation
+- [x] **Feature Flags**: Microsoft.FeatureManagement integration
+- [x] **Background Jobs**: Hangfire for analytics and maintenance tasks
+- [x] **Enhanced Validation**: FluentValidation with comprehensive rules
+
+### 🚀 Roadmap
 
 ### Q1 2024
-- [ ] GraphQL API
-- [ ] Mobile SDKs
-- [ ] Advanced Analytics Dashboard
+- [ ] GraphQL API with Hot Chocolate
+- [ ] Mobile SDKs (iOS/Android)
+- [ ] Advanced Analytics Dashboard with real-time charts
 
 ### Q2 2024
 - [ ] Machine Learning for Fraud Detection
-- [ ] A/B Testing Framework
-- [ ] Enterprise SSO Integration
+- [ ] A/B Testing Framework with statistical analysis
+- [ ] Enterprise SSO Integration (SAML/OIDC)
 
 ### Q3 2024
-- [ ] Blockchain Integration
-- [ ] Advanced Caching Strategies
-- [ ] Multi-tenant Architecture
+- [ ] Multi-tenant Architecture with tenant isolation
+- [ ] Advanced Caching Strategies with predictive warming
+- [ ] Blockchain Integration for immutable audit trails
 
 ---
 

@@ -5,6 +5,10 @@ using URLShortener.Core.Interfaces;
 using URLShortener.Core.Domain.Enhanced;
 using URLShortener.Core.Services;
 using URLShortener.API.Models.DTOs;
+using URLShortener.Core.CQRS.Commands;
+using URLShortener.Core.CQRS.Queries;
+using URLShortener.API.Attributes;
+using MediatR;
 using System.Security.Claims;
 
 namespace URLShortener.API.Controllers;
@@ -13,16 +17,16 @@ namespace URLShortener.API.Controllers;
 [Route("api/[controller]")]
 public class UrlController : ControllerBase
 {
-    private readonly IUrlService _urlService;
+    private readonly IMediator _mediator;
     private readonly IAnalyticsService _analyticsService;
     private readonly ILogger<UrlController> _logger;
 
     public UrlController(
-        IUrlService urlService,
+        IMediator mediator,
         IAnalyticsService analyticsService,
         ILogger<UrlController> logger)
     {
-        _urlService = urlService;
+        _mediator = mediator;
         _analyticsService = analyticsService;
         _logger = logger;
     }
@@ -41,24 +45,25 @@ public class UrlController : ControllerBase
             var ipAddress = GetClientIpAddress();
             var userAgent = Request.Headers.UserAgent.ToString();
 
-            var request = new CreateUrlRequest(
-                OriginalUrl: dto.OriginalUrl,
-                UserId: userId,
-                CustomAlias: dto.CustomAlias,
-                ExpiresAt: dto.ExpiresAt,
-                Metadata: dto.Metadata,
-                IpAddress: ipAddress,
-                UserAgent: userAgent
-            );
+            var command = new CreateShortUrlCommand
+            {
+                OriginalUrl = dto.OriginalUrl,
+                UserId = userId,
+                CustomAlias = dto.CustomAlias,
+                ExpiresAt = dto.ExpiresAt,
+                Metadata = dto.Metadata,
+                IpAddress = ipAddress,
+                UserAgent = userAgent
+            };
 
-            var shortCode = await _urlService.CreateShortUrlAsync(request);
-            var shortUrl = $"{Request.Scheme}://{Request.Host}/r/{shortCode}";
+            var result = await _mediator.Send(command);
+            var shortUrl = $"{Request.Scheme}://{Request.Host}/r/{result.ShortCode}";
 
-            _logger.LogInformation("Created short URL {ShortCode} for user {UserId}", shortCode, userId);
+            _logger.LogInformation("Created short URL {ShortCode} for user {UserId}", result.ShortCode, userId);
 
             return Ok(new CreateUrlResponse 
             {
-                ShortCode = shortCode,
+                ShortCode = result.ShortCode,
                 ShortUrl = shortUrl,
                 OriginalUrl = dto.OriginalUrl,
                 UserId = userId,
@@ -76,13 +81,15 @@ public class UrlController : ControllerBase
     }
 
     [HttpGet("{shortCode}")]
+    [Cacheable(300, "urlstats")] // Cache for 5 minutes
     [ProducesResponseType(typeof(UrlStatistics), 200)]
     [ProducesResponseType(404)]
     public async Task<IActionResult> GetUrlStatistics(string shortCode)
     {
         try
         {
-            var statistics = await _urlService.GetUrlStatisticsAsync(shortCode);
+            var query = new GetUrlQuery { ShortCode = shortCode };
+            var statistics = await _mediator.Send(query);
             return Ok(statistics);
         }
         catch (ArgumentException)
@@ -97,7 +104,15 @@ public class UrlController : ControllerBase
     [ProducesResponseType(404)]
     public async Task<IActionResult> DeleteUrl(string shortCode)
     {
-        var deleted = await _urlService.DeleteUrlAsync(shortCode);
+        var userId = GetUserId();
+        var ipAddress = GetClientIpAddress();
+        var command = new DeleteUrlCommand 
+        { 
+            ShortCode = shortCode,
+            UserId = userId,
+            IpAddress = ipAddress
+        };
+        var deleted = await _mediator.Send(command);
 
         if (!deleted)
         {
@@ -114,7 +129,8 @@ public class UrlController : ControllerBase
     public async Task<IActionResult> GetMyUrls([FromQuery] int skip = 0, [FromQuery] int take = 50)
     {
         var userId = GetUserId();
-        var urls = await _urlService.GetUserUrlsAsync(userId, skip, take);
+        var query = new GetUserUrlsQuery { UserId = userId, Skip = skip, Take = take };
+        var urls = await _mediator.Send(query);
         return Ok(urls);
     }
 
@@ -127,7 +143,8 @@ public class UrlController : ControllerBase
             return BadRequest(new { error = "Search query cannot be empty" });
         }
 
-        var urls = await _urlService.SearchUrlsAsync(q, skip, take);
+        var query = new SearchUrlsQuery { SearchTerm = q, Skip = skip, Take = take };
+        var urls = await _mediator.Send(query);
         return Ok(urls);
     }
 
@@ -139,7 +156,14 @@ public class UrlController : ControllerBase
     {
         try
         {
-            await _urlService.DisableUrlAsync(shortCode, dto.Reason, dto.AdminNotes);
+            var command = new DisableUrlCommand
+            {
+                ShortCode = shortCode,
+                Reason = dto.Reason,
+                AdminNotes = dto.AdminNotes
+            };
+            
+            await _mediator.Send(command);
             _logger.LogInformation("Disabled URL {ShortCode} for reason: {Reason}", shortCode, dto.Reason);
             return NoContent();
         }
@@ -150,10 +174,12 @@ public class UrlController : ControllerBase
     }
 
     [HttpGet("available/{shortCode}")]
+    [Cacheable(60, "availability")] // Cache for 1 minute
     [ProducesResponseType(typeof(AvailabilityResponse), 200)]
     public async Task<IActionResult> CheckAvailability(string shortCode)
     {
-        var isAvailable = await _urlService.IsAvailableAsync(shortCode);
+        var query = new CheckUrlAvailabilityQuery { ShortCode = shortCode };
+        var isAvailable = await _mediator.Send(query);
         return Ok(new { shortCode, available = isAvailable });
     }
 
