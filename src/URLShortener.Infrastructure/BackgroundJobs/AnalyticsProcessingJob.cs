@@ -38,7 +38,7 @@ public class AnalyticsProcessingJob : IAnalyticsProcessingJob
         _logger = logger;
     }
 
-    public async Task ProcessAnalyticsBatchAsync()
+    public Task ProcessAnalyticsBatchAsync()
     {
         _logger.LogInformation("Starting analytics batch processing");
         
@@ -49,15 +49,16 @@ public class AnalyticsProcessingJob : IAnalyticsProcessingJob
             // into summaries, updating materialized views, etc.
             
             _logger.LogInformation("Analytics batch processing completed successfully");
+            return Task.CompletedTask;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during analytics batch processing");
-            throw;
+            return Task.FromException(ex);
         }
     }
 
-    public async Task GenerateDailyReportsAsync()
+    public Task GenerateDailyReportsAsync()
     {
         _logger.LogInformation("Starting daily report generation");
         
@@ -74,11 +75,12 @@ public class AnalyticsProcessingJob : IAnalyticsProcessingJob
             // - Performance metrics
             
             _logger.LogInformation("Daily report generation completed successfully");
+            return Task.CompletedTask;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during daily report generation");
-            throw;
+            return Task.FromException(ex);
         }
     }
 

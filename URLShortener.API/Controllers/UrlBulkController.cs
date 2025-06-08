@@ -235,16 +235,16 @@ public class UrlBulkController : BaseApiController
         OperationId = "UpdateBulkUrlExpiration",
         Tags = new[] { "Bulk Operations" }
     )]
-    public async Task<IActionResult> UpdateBulkUrlExpiration([FromBody] BulkUpdateExpirationRequest request)
+    public Task<IActionResult> UpdateBulkUrlExpiration([FromBody] BulkUpdateExpirationRequest request)
     {
         if (request.Updates?.Any() != true)
         {
-            return CreateErrorResponse("At least one update must be provided");
+            return Task.FromResult(CreateErrorResponse("At least one update must be provided"));
         }
 
         if (request.Updates.Count > 100)
         {
-            return CreateErrorResponse("Maximum 100 URLs can be updated at once");
+            return Task.FromResult(CreateErrorResponse("Maximum 100 URLs can be updated at once"));
         }
 
         var userId = GetUserId();
@@ -297,7 +297,7 @@ public class UrlBulkController : BaseApiController
             Results = results
         };
 
-        return Ok(response);
+        return Task.FromResult<IActionResult>(Ok(response));
     }
 }
 

@@ -283,14 +283,14 @@ public class ShortUrlAggregate : AggregateRoot
             var machineId = Environment.MachineName.GetHashCode() & 0x3FF; // 10 bits
             var sequence = Interlocked.Increment(ref _sequence) & 0xFFF; // 12 bits
 
-            var id = (timestamp << 22) | (machineId << 12) | sequence;
+            var id = (timestamp << 22) | ((uint)machineId << 12) | (uint)sequence;
             var shortCode = Base62.Encode(id);
 
             // Ensure no collision (extremely rare but possible)
             while (_usedCodes.ContainsKey(shortCode))
             {
                 sequence = Interlocked.Increment(ref _sequence) & 0xFFF;
-                id = (timestamp << 22) | (machineId << 12) | sequence;
+                id = (timestamp << 22) | ((uint)machineId << 12) | (uint)sequence;
                 shortCode = Base62.Encode(id);
             }
 
