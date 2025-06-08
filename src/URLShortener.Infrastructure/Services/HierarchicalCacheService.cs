@@ -9,20 +9,24 @@ public class HierarchicalCacheService : ICacheService
 {
     private readonly IMemoryCache _l1Cache;
     private readonly IDistributedCache _l2Cache;
+    private readonly ICdnCache? _l3Cache;
     private readonly IAnalyticsService _analyticsService;
     private readonly ILogger<HierarchicalCacheService> _logger;
 
     private readonly TimeSpan _l1CacheExpiry = TimeSpan.FromMinutes(5);
     private readonly TimeSpan _l2CacheExpiry = TimeSpan.FromHours(1);
+    private readonly TimeSpan _l3CacheExpiry = TimeSpan.FromHours(24);
 
     public HierarchicalCacheService(
         IMemoryCache l1Cache,
         IDistributedCache l2Cache,
         IAnalyticsService analyticsService,
-        ILogger<HierarchicalCacheService> logger)
+        ILogger<HierarchicalCacheService> logger,
+        ICdnCache? l3Cache = null)
     {
         _l1Cache = l1Cache;
         _l2Cache = l2Cache;
+        _l3Cache = l3Cache;
         _analyticsService = analyticsService;
         _logger = logger;
     }
@@ -55,6 +59,9 @@ public class HierarchicalCacheService : ICacheService
                 return l2Value;
             }
 
+            // L3 cache (CDN) is typically handled at the edge level
+            // and doesn't provide direct read access from application layer
+
             stopwatch.Stop();
             await _analyticsService.RecordCacheMissAsync(shortCode, stopwatch.Elapsed);
             _logger.LogDebug("Cache miss for {ShortCode}", shortCode);
@@ -74,8 +81,9 @@ public class HierarchicalCacheService : ICacheService
         {
             var l1Expiry = expiry ?? _l1CacheExpiry;
             var l2Expiry = expiry ?? _l2CacheExpiry;
+            var l3Expiry = expiry ?? _l3CacheExpiry;
 
-            // Set in both caches
+            // Set in all cache layers
             _l1Cache.Set($"url:{shortCode}", originalUrl, l1Expiry);
 
             var options = new DistributedCacheEntryOptions
@@ -85,7 +93,10 @@ public class HierarchicalCacheService : ICacheService
 
             await _l2Cache.SetStringAsync($"url:{shortCode}", originalUrl, options);
 
-            _logger.LogDebug("Cached URL {ShortCode} in both L1 and L2 caches", shortCode);
+            // CDN cache is typically managed through cache headers
+            // and doesn't require explicit setting from application layer
+
+            _logger.LogDebug("Cached URL {ShortCode} in L1 and L2 cache layers", shortCode);
         }
         catch (Exception ex)
         {
@@ -97,11 +108,17 @@ public class HierarchicalCacheService : ICacheService
     {
         try
         {
-            // Remove from both caches
+            // Remove from all cache layers
             _l1Cache.Remove($"url:{shortCode}");
             await _l2Cache.RemoveAsync($"url:{shortCode}");
+            
+            // Invalidate L3 cache (CDN) if available
+            if (_l3Cache != null)
+            {
+                await _l3Cache.InvalidateAsync(shortCode);
+            }
 
-            _logger.LogInformation("Invalidated cache for {ShortCode}, reason: {Reason}", shortCode, reason);
+            _logger.LogInformation("Invalidated cache for {ShortCode} in all layers, reason: {Reason}", shortCode, reason);
         }
         catch (Exception ex)
         {
@@ -138,8 +155,15 @@ public class HierarchicalCacheService : ICacheService
             // In production, you might use Redis SCAN with pattern
             _logger.LogWarning("Pattern invalidation not fully implemented for pattern: {Pattern}", pattern);
 
+            // Invalidate CDN pattern if available
+            if (_l3Cache != null)
+            {
+                await _l3Cache.InvalidatePatternAsync(pattern);
+            }
+
             // This is a simplified implementation
             // In a real scenario, you'd need to track keys or use Redis pattern matching
+            await Task.CompletedTask;
         }
         catch (Exception ex)
         {

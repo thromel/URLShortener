@@ -5,6 +5,7 @@ using URLShortener.Core.Domain.Enhanced;
 using URLShortener.Infrastructure.Data;
 using URLShortener.Infrastructure.Data.Entities;
 using System.Runtime.CompilerServices;
+using System.Collections.Concurrent;
 
 namespace URLShortener.Infrastructure.Services;
 
@@ -12,11 +13,16 @@ public class AnalyticsService : IAnalyticsService
 {
     private readonly UrlShortenerDbContext _context;
     private readonly ILogger<AnalyticsService> _logger;
+    private readonly ConcurrentQueue<AnalyticsEntity> _batchQueue = new();
+    private readonly Timer _batchTimer;
+    private readonly int _batchSize = 1000;
+    private readonly TimeSpan _batchInterval = TimeSpan.FromSeconds(5);
 
     public AnalyticsService(UrlShortenerDbContext context, ILogger<AnalyticsService> logger)
     {
         _context = context;
         _logger = logger;
+        _batchTimer = new Timer(ProcessBatchAsync, null, _batchInterval, _batchInterval);
     }
 
     public async Task RecordAccessAsync(string shortCode, string ipAddress, string userAgent, string referrer, GeoLocation location, DeviceInfo deviceInfo)
@@ -39,10 +45,16 @@ public class AnalyticsService : IAnalyticsService
                 Timestamp = DateTime.UtcNow
             };
 
-            _context.Analytics.Add(analyticsEntity);
-            await _context.SaveChangesAsync();
+            // Add to batch queue instead of immediate save
+            _batchQueue.Enqueue(analyticsEntity);
 
-            _logger.LogDebug("Recorded analytics for {ShortCode} from {Country}", shortCode, location.Country);
+            // If queue is getting large, trigger immediate batch processing
+            if (_batchQueue.Count >= _batchSize)
+            {
+                await Task.Run(() => ProcessBatchAsync(null));
+            }
+
+            _logger.LogDebug("Queued analytics for {ShortCode} from {Country}", shortCode, location.Country);
         }
         catch (Exception ex)
         {
@@ -55,12 +67,14 @@ public class AnalyticsService : IAnalyticsService
         // This could be sent to a time-series database like InfluxDB or Prometheus
         _logger.LogDebug("Cache {Layer} hit for {ShortCode} in {ResponseTime}ms",
             layer, shortCode, responseTime.TotalMilliseconds);
+        await Task.CompletedTask;
     }
 
     public async Task RecordCacheMissAsync(string shortCode, TimeSpan responseTime)
     {
         _logger.LogDebug("Cache miss for {ShortCode} in {ResponseTime}ms",
             shortCode, responseTime.TotalMilliseconds);
+        await Task.CompletedTask;
     }
 
     public async Task RecordSecurityEventAsync(string shortCode, string eventType)
@@ -71,6 +85,7 @@ public class AnalyticsService : IAnalyticsService
         // 1. Send to security monitoring system
         // 2. Trigger alerts if needed
         // 3. Store in security event log
+        await Task.CompletedTask;
     }
 
     public async Task<IEnumerable<PopularUrl>> GetTopUrlsAsync(int count, TimeSpan timeWindow)
@@ -315,6 +330,48 @@ public class AnalyticsService : IAnalyticsService
         return Math.Min(100, accessesPerHour * 10);
     }
 
+    private async void ProcessBatchAsync(object? state)
+    {
+        if (_batchQueue.IsEmpty)
+            return;
+
+        var batch = new List<AnalyticsEntity>();
+        var processedCount = 0;
+
+        // Dequeue up to batch size
+        while (processedCount < _batchSize && _batchQueue.TryDequeue(out var entity))
+        {
+            batch.Add(entity);
+            processedCount++;
+        }
+
+        if (batch.Count == 0)
+            return;
+
+        try
+        {
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            
+            // Use bulk insert for better performance
+            _context.Analytics.AddRange(batch);
+            await _context.SaveChangesAsync();
+            
+            await transaction.CommitAsync();
+
+            _logger.LogInformation("Processed batch of {Count} analytics records", batch.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process analytics batch of {Count} records", batch.Count);
+            
+            // Re-queue failed items
+            foreach (var item in batch)
+            {
+                _batchQueue.Enqueue(item);
+            }
+        }
+    }
+
     private static IEnumerable<string> GetCountriesForRegion(string region)
     {
         return region.ToLowerInvariant() switch
@@ -326,6 +383,13 @@ public class AnalyticsService : IAnalyticsService
             "australia" => new[] { "AU", "NZ" },
             _ => new[] { "Unknown" }
         };
+    }
+
+    public void Dispose()
+    {
+        // Process any remaining items in the queue
+        ProcessBatchAsync(null);
+        _batchTimer?.Dispose();
     }
 }
 

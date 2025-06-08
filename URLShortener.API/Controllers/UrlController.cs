@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using URLShortener.Core.Interfaces;
 using URLShortener.Core.Domain.Enhanced;
+using URLShortener.Core.Services;
+using URLShortener.API.Models.DTOs;
 using System.Security.Claims;
 
 namespace URLShortener.API.Controllers;
@@ -25,9 +28,11 @@ public class UrlController : ControllerBase
     }
 
     [HttpPost]
+    [EnableRateLimiting("UrlCreation")]
     [ProducesResponseType(typeof(CreateUrlResponse), 201)]
     [ProducesResponseType(400)]
     [ProducesResponseType(409)]
+    [ProducesResponseType(429)]
     public async Task<IActionResult> CreateShortUrl([FromBody] CreateUrlDto dto)
     {
         try
@@ -51,7 +56,14 @@ public class UrlController : ControllerBase
 
             _logger.LogInformation("Created short URL {ShortCode} for user {UserId}", shortCode, userId);
 
-            return Ok(new CreateUrlResponse(shortCode, shortUrl, dto.OriginalUrl));
+            return Ok(new CreateUrlResponse 
+            {
+                ShortCode = shortCode,
+                ShortUrl = shortUrl,
+                OriginalUrl = dto.OriginalUrl,
+                UserId = userId,
+                ExpiresAt = dto.ExpiresAt
+            });
         }
         catch (ArgumentException ex)
         {
@@ -187,30 +199,4 @@ public class UrlController : ControllerBase
 
         return Request.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
-}
-
-public record CreateUrlDto(
-    string OriginalUrl,
-    string? CustomAlias = null,
-    DateTime? ExpiresAt = null,
-    Dictionary<string, string>? Metadata = null
-);
-
-public record CreateUrlResponse(
-    string ShortCode,
-    string ShortUrl,
-    string OriginalUrl
-);
-
-public record DisableUrlDto(
-    DisableReason Reason,
-    string? AdminNotes = null
-);
-
-public record AvailabilityResponse(
-    string ShortCode,
-    bool IsAvailable
-)
-{
-    public bool Available { get; init; } = IsAvailable;
 }

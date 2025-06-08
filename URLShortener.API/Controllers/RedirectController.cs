@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using URLShortener.Core.Interfaces;
+using URLShortener.Core.Domain.Enhanced;
+using URLShortener.API.Models.DTOs;
 
 namespace URLShortener.API.Controllers;
 
@@ -17,9 +20,11 @@ public class RedirectController : ControllerBase
     }
 
     [HttpGet("{shortCode}")]
+    [EnableRateLimiting("UrlRedirect")]
     [ProducesResponseType(302)]
     [ProducesResponseType(404)]
     [ProducesResponseType(410)] // Gone - URL expired
+    [ProducesResponseType(429)]
     public async Task<IActionResult> RedirectToUrl(string shortCode)
     {
         try
@@ -52,6 +57,11 @@ public class RedirectController : ControllerBase
             _logger.LogInformation("Redirecting {ShortCode} to {OriginalUrl} from {IpAddress}",
                 shortCode, originalUrl, ipAddress);
 
+            // Add cache headers for CDN
+            Response.Headers["Cache-Control"] = "public, max-age=3600";
+            Response.Headers["CDN-Cache-Control"] = "public, max-age=86400";
+            Response.Headers["Vary"] = "Accept-Encoding";
+
             return Redirect(originalUrl);
         }
         catch (Exception ex)
@@ -73,7 +83,7 @@ public class RedirectController : ControllerBase
             return NotFound();
         }
 
-        Response.Headers.Add("X-Original-URL", originalUrl);
+        Response.Headers["X-Original-URL"] = originalUrl;
         return Ok();
     }
 
@@ -86,13 +96,14 @@ public class RedirectController : ControllerBase
         {
             var statistics = await _urlService.GetUrlStatisticsAsync(shortCode);
 
-            var preview = new PreviewResponse(
-                ShortCode: shortCode,
-                OriginalUrl: statistics.OriginalUrl,
-                CreatedAt: statistics.CreatedAt,
-                AccessCount: statistics.AccessCount,
-                ShortUrl: $"{Request.Scheme}://{Request.Host}/r/{shortCode}"
-            );
+            var preview = new PreviewResponse
+            {
+                ShortCode = shortCode,
+                OriginalUrl = statistics.OriginalUrl,
+                CreatedAt = statistics.CreatedAt,
+                AccessCount = statistics.AccessCount,
+                ShortUrl = $"{Request.Scheme}://{Request.Host}/r/{shortCode}"
+            };
 
             return Ok(preview);
         }
@@ -120,11 +131,3 @@ public class RedirectController : ControllerBase
         return Request.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
 }
-
-public record PreviewResponse(
-    string ShortCode,
-    string OriginalUrl,
-    DateTime CreatedAt,
-    long AccessCount,
-    string ShortUrl
-);

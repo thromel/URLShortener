@@ -1,12 +1,15 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.OpenApi.Models;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using Serilog;
 using URLShortener.Core.Interfaces;
 using URLShortener.Core.Services;
 using URLShortener.Infrastructure.Data;
 using URLShortener.Infrastructure.Repositories;
 using URLShortener.Infrastructure.Services;
+using URLShortener.API.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +25,64 @@ builder.Host.UseSerilog();
 
 // Add services to the container
 builder.Services.AddControllers();
+
+// Add response compression
+builder.Services.AddResponseCompression();
+
+// Add API versioning
+builder.Services.AddApiVersioning();
+
+// Add rate limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    
+    // Global rate limit
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: context.User?.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            factory: partition => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 100,
+                Window = TimeSpan.FromMinutes(1),
+                SegmentsPerWindow = 4,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 10
+            }));
+    
+    // Specific rate limit for URL creation
+    options.AddPolicy("UrlCreation", context =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: context.User?.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            factory: partition => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
+                Window = TimeSpan.FromMinutes(1),
+                SegmentsPerWindow = 2
+            }));
+    
+    // More lenient rate limit for URL redirects
+    options.AddPolicy("UrlRedirect", context =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            factory: partition => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 1000,
+                Window = TimeSpan.FromMinutes(1),
+                SegmentsPerWindow = 4
+            }));
+
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            context.HttpContext.Response.Headers.RetryAfter = retryAfter.TotalSeconds.ToString();
+        }
+
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        await context.HttpContext.Response.WriteAsync("Rate limit exceeded. Please try again later.", cancellationToken);
+    };
+});
 
 // Database Configuration
 builder.Services.AddDbContext<UrlShortenerDbContext>(options =>
@@ -75,6 +136,12 @@ builder.Services.AddAuthorization();
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<UrlShortenerDbContext>();
 
+// Register input validation service
+builder.Services.AddSingleton<IInputValidationService, InputValidationService>();
+
+// Register metrics service
+builder.Services.AddSingleton<IMetrics, MetricsService>();
+
 // Core Service Implementations
 var useEnhancedServices = builder.Configuration.GetValue<bool>("Features:UseEnhancedServices", false);
 
@@ -105,44 +172,7 @@ else
 
 // Swagger/OpenAPI
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(options =>
-{
-    options.SwaggerDoc("v1", new OpenApiInfo
-    {
-        Title = "URL Shortener API",
-        Version = "v1",
-        Description = "Enterprise-grade URL shortener with advanced analytics and caching",
-        Contact = new OpenApiContact
-        {
-            Name = "URL Shortener Team",
-            Email = "support@urlshortener.com"
-        }
-    });
-
-    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
-    {
-        Description = "JWT Authorization header using the Bearer scheme",
-        Name = "Authorization",
-        In = ParameterLocation.Header,
-        Type = SecuritySchemeType.ApiKey,
-        Scheme = "Bearer"
-    });
-
-    options.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
-        {
-            new OpenApiSecurityScheme
-            {
-                Reference = new OpenApiReference
-                {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer"
-                }
-            },
-            Array.Empty<string>()
-        }
-    });
-});
+builder.Services.AddSwaggerGen();
 
 // CORS
 builder.Services.AddCors(options =>
@@ -203,7 +233,17 @@ app.Use(async (context, next) =>
 });
 
 app.UseHttpsRedirection();
+
+// Add response compression
+app.UseResponseCompression();
+
 app.UseCors("AllowWebApp");
+
+// Add rate limiting middleware
+app.UseRateLimiter();
+
+// Add metrics middleware (simplified)
+// app.UseMiddleware<MetricsMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
