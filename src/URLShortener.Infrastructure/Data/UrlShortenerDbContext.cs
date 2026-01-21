@@ -13,6 +13,11 @@ public class UrlShortenerDbContext : DbContext
     public DbSet<UrlEntity> Urls { get; set; }
     public DbSet<EventEntity> Events { get; set; }
     public DbSet<AnalyticsEntity> Analytics { get; set; }
+    public DbSet<UserEntity> Users { get; set; }
+    public DbSet<RefreshTokenEntity> RefreshTokens { get; set; }
+    public DbSet<OrganizationEntity> Organizations { get; set; }
+    public DbSet<OrganizationMemberEntity> OrganizationMembers { get; set; }
+    public DbSet<RoleEntity> Roles { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -112,6 +117,147 @@ public class UrlShortenerDbContext : DbContext
 
             entity.Property(e => e.OperatingSystem)
                 .HasMaxLength(50);
+        });
+
+        // Configure UserEntity
+        modelBuilder.Entity<UserEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.Email).IsUnique();
+
+            entity.Property(e => e.Email)
+                .IsRequired()
+                .HasMaxLength(256);
+
+            entity.Property(e => e.PasswordHash)
+                .IsRequired()
+                .HasMaxLength(256);
+
+            entity.Property(e => e.DisplayName)
+                .IsRequired()
+                .HasMaxLength(100);
+        });
+
+        // Configure RefreshTokenEntity
+        modelBuilder.Entity<RefreshTokenEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.TokenHash);
+            entity.HasIndex(e => e.UserId);
+
+            entity.Property(e => e.TokenHash)
+                .IsRequired()
+                .HasMaxLength(256);
+
+            entity.Property(e => e.CreatedByIp)
+                .HasMaxLength(45);
+
+            entity.Property(e => e.RevokedByIp)
+                .HasMaxLength(45);
+
+            entity.Property(e => e.ReasonRevoked)
+                .HasMaxLength(256);
+
+            entity.HasOne(e => e.User)
+                .WithMany(u => u.RefreshTokens)
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.ReplacedByToken)
+                .WithMany()
+                .HasForeignKey(e => e.ReplacedByTokenId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // Configure OrganizationEntity
+        modelBuilder.Entity<OrganizationEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.Slug).IsUnique();
+
+            entity.Property(e => e.Name)
+                .IsRequired()
+                .HasMaxLength(100);
+
+            entity.Property(e => e.Slug)
+                .IsRequired()
+                .HasMaxLength(50);
+
+            entity.Property(e => e.Settings)
+                .HasColumnType("jsonb")
+                .HasConversion(
+                    v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions?)null),
+                    v => System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? new Dictionary<string, object>()
+                );
+
+            entity.HasOne(e => e.Owner)
+                .WithMany(u => u.OwnedOrganizations)
+                .HasForeignKey(e => e.OwnerId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // Configure RoleEntity
+        modelBuilder.Entity<RoleEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.OrganizationId, e.Name }).IsUnique();
+
+            entity.Property(e => e.Name)
+                .IsRequired()
+                .HasMaxLength(50);
+
+            entity.Property(e => e.Description)
+                .HasMaxLength(256);
+
+            entity.Property(e => e.Permissions)
+                .HasColumnType("jsonb")
+                .HasConversion(
+                    v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions?)null),
+                    v => System.Text.Json.JsonSerializer.Deserialize<List<string>>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? new List<string>()
+                );
+
+            entity.HasOne(e => e.Organization)
+                .WithMany(o => o.Roles)
+                .HasForeignKey(e => e.OrganizationId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Configure OrganizationMemberEntity
+        modelBuilder.Entity<OrganizationMemberEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.OrganizationId, e.UserId }).IsUnique();
+
+            entity.HasOne(e => e.Organization)
+                .WithMany(o => o.Members)
+                .HasForeignKey(e => e.OrganizationId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.User)
+                .WithMany(u => u.OrganizationMemberships)
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Role)
+                .WithMany(r => r.Members)
+                .HasForeignKey(e => e.RoleId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // Update UrlEntity relationships
+        modelBuilder.Entity<UrlEntity>(entity =>
+        {
+            entity.HasOne(e => e.User)
+                .WithMany(u => u.Urls)
+                .HasForeignKey(e => e.CreatedBy)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Organization)
+                .WithMany(o => o.Urls)
+                .HasForeignKey(e => e.OrganizationId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasIndex(e => e.OrganizationId);
         });
     }
 }

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using URLShortener.Core.CQRS.Queries;
 using URLShortener.Core.Domain.Enhanced;
 using URLShortener.Core.Interfaces;
+using URLShortener.Core.Telemetry;
 using System.Diagnostics;
 
 namespace URLShortener.Core.CQRS.Handlers;
@@ -25,7 +26,8 @@ public class GetUrlQueryHandler : IRequestHandler<GetUrlQuery, UrlStatistics?>
 
     public async Task<UrlStatistics?> Handle(GetUrlQuery request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.GetUrl, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.ShortCode, request.ShortCode);
 
         try
         {
@@ -33,12 +35,18 @@ public class GetUrlQueryHandler : IRequestHandler<GetUrlQuery, UrlStatistics?>
             var url = await _urlRepository.GetByShortCodeAsync(request.ShortCode);
             if (url == null)
             {
+                activity?.SetTag("url.found", false);
+                Diagnostics.RecordSuccess(activity);
                 return null;
             }
+
+            activity?.SetTag("url.found", true);
+            activity?.SetTag(Diagnostics.Tags.UrlStatus, url.Status.ToString());
 
             // Get analytics summary
             var summary = await _analyticsService.GetSummaryAsync(request.ShortCode);
 
+            Diagnostics.RecordSuccess(activity);
             return new UrlStatistics(
                 ShortCode: url.ShortCode,
                 OriginalUrl: url.OriginalUrl,
@@ -55,7 +63,7 @@ public class GetUrlQueryHandler : IRequestHandler<GetUrlQuery, UrlStatistics?>
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to get URL statistics for {ShortCode}", request.ShortCode);
-            // TODO: Activity tracing
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
@@ -85,7 +93,8 @@ public class GetOriginalUrlQueryHandler : IRequestHandler<GetOriginalUrlQuery, s
 
     public async Task<string?> Handle(GetOriginalUrlQuery request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.GetOriginalUrl, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.ShortCode, request.ShortCode);
 
         try
         {
@@ -93,8 +102,9 @@ public class GetOriginalUrlQueryHandler : IRequestHandler<GetOriginalUrlQuery, s
             var cachedUrl = await _cacheService.GetOriginalUrlAsync(request.ShortCode);
             if (!string.IsNullOrEmpty(cachedUrl))
             {
-                // TODO: Activity tracing
-                
+                activity?.SetTag(Diagnostics.Tags.CacheHit, true);
+                activity?.SetTag(Diagnostics.Tags.CacheLevel, "L1/L2");
+
                 // Record access asynchronously
                 _ = Task.Run(async () =>
                 {
@@ -102,7 +112,7 @@ public class GetOriginalUrlQueryHandler : IRequestHandler<GetOriginalUrlQuery, s
                     {
                         var location = await _geoLocationService.GetLocationAsync(request.IpAddress);
                         var deviceInfo = ParseDeviceInfo(request.UserAgent);
-                        await _analyticsService.RecordAccessAsync(request.ShortCode, request.IpAddress, 
+                        await _analyticsService.RecordAccessAsync(request.ShortCode, request.IpAddress,
                             request.UserAgent, request.Referrer, location, deviceInfo);
                     }
                     catch (Exception ex)
@@ -111,19 +121,22 @@ public class GetOriginalUrlQueryHandler : IRequestHandler<GetOriginalUrlQuery, s
                     }
                 }, cancellationToken);
 
+                Diagnostics.RecordSuccess(activity);
                 return cachedUrl;
             }
 
-            // TODO: Activity tracing
+            activity?.SetTag(Diagnostics.Tags.CacheHit, false);
 
             // Fallback to repository
             var originalUrl = await _urlRepository.GetOriginalUrlAsync(request.ShortCode);
 
             if (!string.IsNullOrEmpty(originalUrl))
             {
+                activity?.SetTag("url.found", true);
+
                 // Cache for future requests
                 await _cacheService.SetAsync(request.ShortCode, originalUrl);
-                
+
                 // Record access
                 _ = Task.Run(async () =>
                 {
@@ -131,7 +144,7 @@ public class GetOriginalUrlQueryHandler : IRequestHandler<GetOriginalUrlQuery, s
                     {
                         var location = await _geoLocationService.GetLocationAsync(request.IpAddress);
                         var deviceInfo = ParseDeviceInfo(request.UserAgent);
-                        await _analyticsService.RecordAccessAsync(request.ShortCode, request.IpAddress, 
+                        await _analyticsService.RecordAccessAsync(request.ShortCode, request.IpAddress,
                             request.UserAgent, request.Referrer, location, deviceInfo);
                     }
                     catch (Exception ex)
@@ -140,14 +153,18 @@ public class GetOriginalUrlQueryHandler : IRequestHandler<GetOriginalUrlQuery, s
                     }
                 }, cancellationToken);
             }
+            else
+            {
+                activity?.SetTag("url.found", false);
+            }
 
-            // TODO: Activity tracing
+            Diagnostics.RecordSuccess(activity);
             return originalUrl;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to get original URL for {ShortCode}", request.ShortCode);
-            // TODO: Activity tracing
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
@@ -192,7 +209,8 @@ public class GetUrlStatisticsQueryHandler : IRequestHandler<GetUrlStatisticsQuer
 
     public async Task<UrlStatistics?> Handle(GetUrlStatisticsQuery request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.GetUrlStatistics, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.ShortCode, request.ShortCode);
 
         try
         {
@@ -200,12 +218,17 @@ public class GetUrlStatisticsQueryHandler : IRequestHandler<GetUrlStatisticsQuer
             var url = await _urlRepository.GetByShortCodeAsync(request.ShortCode);
             if (url == null)
             {
+                activity?.SetTag("url.found", false);
+                Diagnostics.RecordSuccess(activity);
                 return null;
             }
+
+            activity?.SetTag("url.found", true);
 
             // Get analytics summary
             var summary = await _analyticsService.GetSummaryAsync(request.ShortCode);
 
+            Diagnostics.RecordSuccess(activity);
             return new UrlStatistics(
                 ShortCode: url.ShortCode,
                 OriginalUrl: url.OriginalUrl,
@@ -222,7 +245,7 @@ public class GetUrlStatisticsQueryHandler : IRequestHandler<GetUrlStatisticsQuer
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to get statistics for {ShortCode}", request.ShortCode);
-            // TODO: Activity tracing
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
@@ -246,26 +269,33 @@ public class CheckUrlAvailabilityQueryHandler : IRequestHandler<CheckUrlAvailabi
 
     public async Task<bool> Handle(CheckUrlAvailabilityQuery request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.CheckUrlAvailability, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.ShortCode, request.ShortCode);
 
         try
         {
             // Check cache first
             if (await _cacheService.ExistsAsync(request.ShortCode))
             {
+                activity?.SetTag(Diagnostics.Tags.CacheHit, true);
+                activity?.SetTag("url.available", false);
+                Diagnostics.RecordSuccess(activity);
                 return false;
             }
 
+            activity?.SetTag(Diagnostics.Tags.CacheHit, false);
+
             // Check repository
             var isAvailable = !await _urlRepository.ExistsAsync(request.ShortCode);
-            
-            // TODO: Activity tracing
+
+            activity?.SetTag("url.available", isAvailable);
+            Diagnostics.RecordSuccess(activity);
             return isAvailable;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to check availability for {ShortCode}", request.ShortCode);
-            // TODO: Activity tracing
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
@@ -289,7 +319,10 @@ public class GetUserUrlsQueryHandler : IRequestHandler<GetUserUrlsQuery, IEnumer
 
     public async Task<IEnumerable<UrlStatistics>> Handle(GetUserUrlsQuery request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.GetUserUrls, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.UserId, request.UserId);
+        activity?.SetTag("query.skip", request.Skip);
+        activity?.SetTag("query.take", request.Take);
 
         try
         {
@@ -313,11 +346,14 @@ public class GetUserUrlsQueryHandler : IRequestHandler<GetUserUrlsQuery, IEnumer
                 ));
             }
 
+            activity?.SetTag(Diagnostics.Tags.ResultCount, urlStatistics.Count);
+            Diagnostics.RecordSuccess(activity);
             return urlStatistics;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to get URLs for user {UserId}", request.UserId);
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
@@ -341,7 +377,10 @@ public class SearchUrlsQueryHandler : IRequestHandler<SearchUrlsQuery, IEnumerab
 
     public async Task<IEnumerable<UrlStatistics>> Handle(SearchUrlsQuery request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.SearchUrls, ActivityKind.Internal);
+        activity?.SetTag("query.search_term", request.SearchTerm);
+        activity?.SetTag("query.skip", request.Skip);
+        activity?.SetTag("query.take", request.Take);
 
         try
         {
@@ -365,11 +404,14 @@ public class SearchUrlsQueryHandler : IRequestHandler<SearchUrlsQuery, IEnumerab
                 ));
             }
 
+            activity?.SetTag(Diagnostics.Tags.ResultCount, urlStatistics.Count);
+            Diagnostics.RecordSuccess(activity);
             return urlStatistics;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to search URLs with term {SearchTerm}", request.SearchTerm);
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }

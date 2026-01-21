@@ -48,16 +48,21 @@ public class ClientInfoService : IClientInfoService
         var context = _httpContextAccessor.HttpContext;
         if (context?.User?.Identity?.IsAuthenticated == true)
         {
+            // Try standard NameIdentifier claim first
             var userIdClaim = context.User.FindFirst(ClaimTypes.NameIdentifier);
+
+            // Fall back to JWT 'sub' claim if not found
+            userIdClaim ??= context.User.FindFirst("sub");
+
             if (userIdClaim != null && Guid.TryParse(userIdClaim.Value, out var userId))
             {
                 return userId;
             }
         }
 
-        // For demo purposes, return a default user ID
-        // In production, this should be properly authenticated
-        return Guid.Parse("00000000-0000-0000-0000-000000000001");
+        // Return empty GUID for unauthenticated requests
+        // Endpoints requiring auth should use [Authorize] attribute
+        return Guid.Empty;
     }
 
     public string GetClientIpAddress()

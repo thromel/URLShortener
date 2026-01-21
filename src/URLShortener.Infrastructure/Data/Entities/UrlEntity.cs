@@ -10,12 +10,17 @@ public class UrlEntity
     public DateTime CreatedAt { get; set; }
     public DateTime? ExpiresAt { get; set; }
     public Guid CreatedBy { get; set; }
+    public Guid? OrganizationId { get; set; }  // Null for personal URLs
     public UrlStatus Status { get; set; }
     public long AccessCount { get; set; }
     public DateTime? LastAccessedAt { get; set; }
     public Dictionary<string, string> Metadata { get; set; } = new();
     public List<string> Tags { get; set; } = new();
     public int Version { get; set; }
+
+    // Navigation properties
+    public UserEntity? User { get; set; }
+    public OrganizationEntity? Organization { get; set; }
 
     public static UrlEntity FromAggregate(ShortUrlAggregate aggregate)
     {

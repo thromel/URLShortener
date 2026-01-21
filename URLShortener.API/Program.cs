@@ -6,6 +6,7 @@ using System.Threading.RateLimiting;
 using Serilog;
 using URLShortener.Core.Interfaces;
 using URLShortener.Core.Services;
+using URLShortener.Core.Telemetry;
 using URLShortener.Infrastructure.Data;
 using URLShortener.Infrastructure.Repositories;
 using URLShortener.Infrastructure.Services;
@@ -16,8 +17,11 @@ using URLShortener.Core.CQRS.Behaviors;
 using Microsoft.FeatureManagement;
 using Hangfire;
 using Hangfire.SqlServer;
+using Hangfire.InMemory;
 using URLShortener.Infrastructure.BackgroundJobs;
 using URLShortener.API.Authorization;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +50,32 @@ builder.Host.UseSerilog();
 
 // Add services to the container
 builder.Services.AddControllers();
+builder.Services.AddHttpContextAccessor();
+
+// Add SignalR for real-time notifications
+builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+    options.MaximumReceiveMessageSize = 32 * 1024; // 32KB
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+});
+
+// Add GraphQL with Hot Chocolate
+builder.Services
+    .AddGraphQLServer()
+    .AddAuthorization()
+    .AddQueryType<URLShortener.API.GraphQL.Query>()
+    .AddMutationType<URLShortener.API.GraphQL.Mutation>()
+    .AddSubscriptionType<URLShortener.API.GraphQL.Subscription>()
+    .AddInMemorySubscriptions()
+    .AddFiltering()
+    .AddSorting()
+    .AddProjections()
+    .ModifyRequestOptions(opt =>
+    {
+        opt.IncludeExceptionDetails = builder.Environment.IsDevelopment();
+    });
 
 // Add MediatR and CQRS
 builder.Services.AddMediatR(cfg => {
@@ -62,9 +92,75 @@ builder.Services.AddValidatorsFromAssembly(typeof(URLShortener.Core.CQRS.Validat
 builder.Services.AddFeatureManagement();
 builder.Services.AddScoped<URLShortener.API.Features.IFeatureFlagService, URLShortener.API.Features.FeatureFlagService>();
 
+// Add OpenTelemetry distributed tracing
+var otlpEndpoint = builder.Configuration["OpenTelemetry:OtlpEndpoint"];
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource
+        .AddService(
+            serviceName: Diagnostics.ServiceName,
+            serviceVersion: Diagnostics.ServiceVersion)
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = builder.Environment.EnvironmentName,
+            ["host.name"] = Environment.MachineName
+        }))
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddSource(Diagnostics.ServiceName)
+            .AddAspNetCoreInstrumentation(options =>
+            {
+                options.RecordException = true;
+                options.Filter = httpContext =>
+                {
+                    // Don't trace health checks or static files
+                    var path = httpContext.Request.Path.Value ?? "";
+                    return !path.StartsWith("/health") && !path.StartsWith("/docs");
+                };
+            })
+            .AddHttpClientInstrumentation(options =>
+            {
+                options.RecordException = true;
+            })
+            .AddEntityFrameworkCoreInstrumentation(options =>
+            {
+                options.SetDbStatementForText = true;
+            });
+
+        // Add OTLP exporter if endpoint is configured
+        if (!string.IsNullOrEmpty(otlpEndpoint))
+        {
+            tracing.AddOtlpExporter(options =>
+            {
+                options.Endpoint = new Uri(otlpEndpoint);
+            });
+            Log.Information("OpenTelemetry OTLP exporter configured: {Endpoint}", otlpEndpoint);
+        }
+        else
+        {
+            // Use console exporter for development
+            tracing.AddConsoleExporter();
+            Log.Information("OpenTelemetry console exporter enabled (no OTLP endpoint configured)");
+        }
+    });
+
 // Add Hangfire
 var hangfireConnection = builder.Configuration.GetConnectionString("DefaultConnection");
-if (!string.IsNullOrEmpty(hangfireConnection))
+var useInMemoryHangfire = builder.Environment.IsDevelopment() || string.IsNullOrEmpty(hangfireConnection);
+
+if (useInMemoryHangfire)
+{
+    // Use in-memory storage for development
+    builder.Services.AddHangfire(configuration => configuration
+        .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+        .UseSimpleAssemblyNameTypeSerializer()
+        .UseRecommendedSerializerSettings()
+        .UseInMemoryStorage());
+
+    builder.Services.AddHangfireServer();
+    Log.Information("Hangfire configured with in-memory storage for development");
+}
+else if (!string.IsNullOrEmpty(hangfireConnection))
 {
     builder.Services.AddHangfire(configuration => configuration
         .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -78,7 +174,7 @@ if (!string.IsNullOrEmpty(hangfireConnection))
             UseRecommendedIsolationLevel = true,
             DisableGlobalLocks = true
         }));
-    
+
     builder.Services.AddHangfireServer();
 }
 
@@ -168,10 +264,11 @@ builder.Services.AddDbContext<UrlShortenerDbContext>(options =>
     if (!string.IsNullOrEmpty(connectionString))
     {
         options.UseNpgsql(connectionString);
+        Log.Information("Using PostgreSQL database");
     }
     else
     {
-        // Fallback to in-memory database for development
+        // Fallback to in-memory database if no connection string
         options.UseInMemoryDatabase("URLShortenerDb");
         Log.Warning("Using in-memory database. Configure PostgreSQL connection string for production.");
     }
@@ -198,16 +295,66 @@ else
     Log.Warning("Using in-memory distributed cache. Configure Redis for production.");
 }
 
-// Authentication & Authorization
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+// Authentication & Authorization - Self-contained JWT validation
+var jwtSecret = builder.Configuration["Jwt:Secret"] ?? throw new InvalidOperationException("JWT Secret not configured");
+var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "URLShortener";
+var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "urlshortener-api";
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+    options.SaveToken = true;
+    options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
     {
-        options.Authority = builder.Configuration["Authentication:Authority"];
-        options.Audience = builder.Configuration["Authentication:Audience"];
-        options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
-    });
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtIssuer,
+        ValidAudience = jwtAudience,
+        IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(
+            System.Text.Encoding.UTF8.GetBytes(jwtSecret)),
+        ClockSkew = TimeSpan.FromMinutes(1) // Allow 1 minute clock skew
+    };
+
+    // Configure events for debugging and SignalR support
+    options.Events = new Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            // Allow JWT token in query string for SignalR
+            var accessToken = context.Request.Query["access_token"];
+            var path = context.HttpContext.Request.Path;
+            if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+            {
+                context.Token = accessToken;
+            }
+            return Task.CompletedTask;
+        },
+        OnAuthenticationFailed = context =>
+        {
+            if (context.Exception.GetType() == typeof(Microsoft.IdentityModel.Tokens.SecurityTokenExpiredException))
+            {
+                context.Response.Headers["Token-Expired"] = "true";
+            }
+            Log.Warning("Authentication failed: {Error}", context.Exception.Message);
+            return Task.CompletedTask;
+        }
+    };
+});
 
 builder.Services.AddAuthorization();
+
+// Register Auth Service
+builder.Services.AddScoped<IAuthService, AuthService>();
+
+// Register Organization Service
+builder.Services.AddScoped<IOrganizationService, OrganizationService>();
 
 // Health Checks
 builder.Services.AddHealthChecks()
@@ -246,6 +393,10 @@ if (useEnhancedServices)
     builder.Services.AddScoped<IGeoLocationService, GeoLocationService>();
     builder.Services.AddScoped<ICdnCache, CloudFrontCacheService>();
     builder.Services.AddScoped<IUrlService, EnhancedUrlService>();
+    builder.Services.AddScoped<IDashboardService, DashboardService>();
+
+    // Access pattern analysis for predictive caching
+    builder.Services.AddScoped<IAccessPatternAnalyzer, AccessPatternAnalyzer>();
 
     // Background services
     builder.Services.AddHostedService<PredictiveCacheWarmingService>();
@@ -258,6 +409,12 @@ else
     builder.Services.AddScoped<IUrlRepository, UrlRepository>();
     builder.Services.AddScoped<IUrlService, BasicUrlService>();
     builder.Services.AddScoped<IAnalyticsService, BasicAnalyticsService>();
+    builder.Services.AddScoped<IDashboardService, DashboardService>();
+    // Required by MediatR handlers even in basic mode
+    builder.Services.AddScoped<ICacheService, HierarchicalCacheService>();
+    builder.Services.AddScoped<IGeoLocationService, GeoLocationService>();
+    builder.Services.AddScoped<IEventStore, EventStore>();
+    builder.Services.AddScoped<ICdnCache, CloudFrontCacheService>();
     Log.Information("Using basic services for development");
 }
 
@@ -328,7 +485,7 @@ builder.Services.AddSwaggerGen(options =>
 
     // Include XML comments if available
     var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
-    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    var xmlPath = System.IO.Path.Combine(AppContext.BaseDirectory, xmlFile);
     if (File.Exists(xmlPath))
     {
         options.IncludeXmlComments(xmlPath);
@@ -343,7 +500,10 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowWebApp", policy =>
     {
-        policy.WithOrigins("http://localhost:3000", "https://app.urlshortener.com")
+        policy.WithOrigins(
+                "http://localhost:3000",
+                "http://localhost:4200",  // Angular dev server
+                "https://app.urlshortener.com")
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
@@ -427,41 +587,45 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Add Hangfire Dashboard
-if (!string.IsNullOrEmpty(hangfireConnection))
+// Add Hangfire Dashboard (always available now - uses in-memory in development)
+app.UseHangfireDashboard("/hangfire", new DashboardOptions
 {
-    app.UseHangfireDashboard("/hangfire", new DashboardOptions
-    {
-        Authorization = new[] { new HangfireAuthorizationFilter() }
-    });
-    
-    // Schedule recurring jobs
-    RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
-        "analytics-processing",
-        job => job.ProcessAnalyticsBatchAsync(),
-        Cron.Hourly);
-    
-    RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
-        "daily-reports",
-        job => job.GenerateDailyReportsAsync(),
-        Cron.Daily(2)); // Run at 2 AM
-    
-    RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
-        "cleanup-expired",
-        job => job.CleanupExpiredUrlsAsync(),
-        Cron.Daily(3)); // Run at 3 AM
-    
-    RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
-        "cache-warming",
-        job => job.WarmPopularUrlCacheAsync(),
-        "*/30 * * * *"); // Every 30 minutes
-}
+    Authorization = new[] { new HangfireAuthorizationFilter() }
+});
+
+// Schedule recurring jobs
+RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
+    "analytics-processing",
+    job => job.ProcessAnalyticsBatchAsync(),
+    Cron.Hourly);
+
+RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
+    "daily-reports",
+    job => job.GenerateDailyReportsAsync(),
+    Cron.Daily(2)); // Run at 2 AM
+
+RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
+    "cleanup-expired",
+    job => job.CleanupExpiredUrlsAsync(),
+    Cron.Daily(3)); // Run at 3 AM
+
+RecurringJob.AddOrUpdate<IAnalyticsProcessingJob>(
+    "cache-warming",
+    job => job.WarmPopularUrlCacheAsync(),
+    "*/30 * * * *"); // Every 30 minutes
 
 // Health checks
 app.MapHealthChecks("/health");
 
 // API Controllers
 app.MapControllers();
+
+// SignalR Hubs
+app.MapHub<URLShortener.API.Hubs.AnalyticsHub>("/hubs/analytics");
+
+// GraphQL endpoint
+app.MapGraphQL("/graphql");
+app.UseWebSockets(); // Required for GraphQL subscriptions
 
 // Global exception handling
 app.UseExceptionHandler(errorApp =>
@@ -489,6 +653,8 @@ app.UseExceptionHandler(errorApp =>
 Log.Information("Starting URL Shortener API with enhanced features: {UseEnhanced}", useEnhancedServices);
 Log.Information("Hangfire enabled: {HangfireEnabled}", !string.IsNullOrEmpty(hangfireConnection));
 Log.Information("Feature management enabled: {FeatureManagement}", true);
+Log.Information("SignalR real-time notifications enabled at /hubs/analytics");
+Log.Information("GraphQL API enabled at /graphql");
 
 try
 {

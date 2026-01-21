@@ -4,6 +4,7 @@ using URLShortener.Core.CQRS.Commands;
 using URLShortener.Core.Domain.Enhanced;
 using URLShortener.Core.Interfaces;
 using URLShortener.Core.Services;
+using URLShortener.Core.Telemetry;
 using System.Diagnostics;
 
 namespace URLShortener.Core.CQRS.Handlers;
@@ -38,7 +39,9 @@ public class CreateShortUrlHandler : IRequestHandler<CreateShortUrlCommand, Crea
 
     public async Task<CreateShortUrlResult> Handle(CreateShortUrlCommand request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing with ActivitySource
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.CreateShortUrl, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.UserId, request.UserId);
+        activity?.SetTag(Diagnostics.Tags.OperationType, "create");
 
         try
         {
@@ -79,10 +82,12 @@ public class CreateShortUrlHandler : IRequestHandler<CreateShortUrlCommand, Crea
             // Clear uncommitted events
             aggregate.ClearUncommittedEvents();
 
-            _logger.LogInformation("Successfully created short URL {ShortCode} for user {UserId}", 
+            _logger.LogInformation("Successfully created short URL {ShortCode} for user {UserId}",
                 aggregate.ShortCode, request.UserId);
 
-            // TODO: Activity tracing
+            // Record successful completion with result metadata
+            activity?.SetTag(Diagnostics.Tags.ShortCode, aggregate.ShortCode);
+            Diagnostics.RecordSuccess(activity);
 
             return new CreateShortUrlResult
             {
@@ -97,7 +102,7 @@ public class CreateShortUrlHandler : IRequestHandler<CreateShortUrlCommand, Crea
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to create short URL for {OriginalUrl}", request.OriginalUrl);
-            // TODO: Activity tracing
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
@@ -121,7 +126,10 @@ public class DeleteUrlHandler : IRequestHandler<DeleteUrlCommand, bool>
 
     public async Task<bool> Handle(DeleteUrlCommand request, CancellationToken cancellationToken)
     {
-        // TODO: Add proper Activity tracing
+        using var activity = Diagnostics.StartActivity(Diagnostics.Operations.DeleteUrl, ActivityKind.Internal);
+        activity?.SetTag(Diagnostics.Tags.ShortCode, request.ShortCode);
+        activity?.SetTag(Diagnostics.Tags.UserId, request.UserId);
+        activity?.SetTag(Diagnostics.Tags.OperationType, "delete");
 
         try
         {
@@ -129,26 +137,33 @@ public class DeleteUrlHandler : IRequestHandler<DeleteUrlCommand, bool>
             var url = await _urlRepository.GetByShortCodeAsync(request.ShortCode);
             if (url == null)
             {
+                activity?.SetTag("url.found", false);
+                Diagnostics.RecordSuccess(activity);
                 return false;
             }
 
+            activity?.SetTag("url.found", true);
+
             // For now, delete regardless of user (can add authorization logic later)
             var deleted = await _urlRepository.DeleteAsync(request.ShortCode);
-            
+
             if (deleted)
             {
                 // Remove from cache
                 await _cacheService.InvalidateAsync(request.ShortCode, CacheInvalidationReason.UrlDeleted);
-                _logger.LogInformation("Successfully deleted URL {ShortCode} by user {UserId}", 
+                _logger.LogInformation("Successfully deleted URL {ShortCode} by user {UserId}",
                     request.ShortCode, request.UserId);
             }
 
+            activity?.SetTag("url.deleted", deleted);
+            Diagnostics.RecordSuccess(activity);
             return deleted;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to delete URL {ShortCode} for user {UserId}", 
+            _logger.LogError(ex, "Failed to delete URL {ShortCode} for user {UserId}",
                 request.ShortCode, request.UserId);
+            Diagnostics.RecordException(activity, ex);
             throw;
         }
     }
