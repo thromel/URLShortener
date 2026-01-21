@@ -79,3 +79,7 @@ coverage/
 
 # Docker
 docker-compose.override.yml
+# IDE and local
+.DS_Store
+.claude/
+.playwright-mcp/
